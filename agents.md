@@ -4,11 +4,12 @@
 
 This repository contains ScopePilot, an AI-assisted educational microscopy application.
 
-Read PROJECT_CONTEXT.md and ARCHITECTURE.md before making architectural changes.
+Read PROJECT\_CONTEXT.md and ARCHITECTURE.md before making architectural changes.
 
 ## Development Philosophy
 
 Prioritize:
+
 1. simplicity
 2. working functionality
 3. maintainability
@@ -45,10 +46,10 @@ Backend uses FastAPI and Python.
 
 Structure responsibilities separately:
 
-- routes = HTTP/API endpoints
-- schemas = Pydantic request/response models
-- services = Gemini/RAG/business logic
-- config = environment/configuration
+* routes = HTTP/API endpoints
+* schemas = Pydantic request/response models
+* services = Gemini/RAG/business logic
+* config = environment/configuration
 
 Do not place Gemini API logic directly inside route handlers.
 
@@ -80,11 +81,11 @@ Do not display fake confidence percentages.
 
 Prefer fields such as:
 
-- probable_specimen
-- visible_structures
-- observations
-- explanation
-- limitations
+* probable\_specimen
+* visible\_structures
+* observations
+* explanation
+* limitations
 
 The application is educational and must not provide medical diagnosis.
 
@@ -105,3 +106,39 @@ Build in this order:
 11. UI polish
 
 Do not work on future features before these are functional.
+
+
+\## Secrets
+
+
+
+Never read, print, log, copy, expose, or include the contents of .env files or secret values.
+
+
+
+Treat backend/.env as user-managed secret configuration.
+
+
+
+Use only the environment variable name GEMINI\_API\_KEY in code.
+
+
+
+Do not include secrets in:
+
+\- source code
+
+\- tests
+
+\- logs
+
+\- README files
+
+\- commits
+
+\- generated documentation
+
+
+
+Do not inspect backend/.env.
+
