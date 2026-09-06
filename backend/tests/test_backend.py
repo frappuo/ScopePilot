@@ -68,7 +68,10 @@ def test_analyze_success(client, sdk, fmt, mime):
     args = sdk.call_args.kwargs
     assert args["contents"][0].inline_data.data == data
     assert args["contents"][0].inline_data.mime_type == mime
-    assert args["config"].response_schema is gemini.Analysis
+    expected_schema = gemini.Analysis.model_json_schema()
+    expected_schema.pop("additionalProperties", None)
+    assert args["config"].response_schema == expected_schema
+    assert args["config"].automatic_function_calling.disable is True
 
 
 @pytest.mark.parametrize("data,mime,status", [
@@ -112,6 +115,7 @@ def test_invalid_gemini_response(client, sdk, text):
     (httpx.ConnectError("private provider detail"), 502),
     (errors.ClientError(429, {"error": {"message": "private provider detail"}}), 503),
     (errors.ClientError(403, {"error": {"message": "private provider detail"}}), 502),
+    (errors.ClientError(404, {"error": {"message": "private provider detail"}}), 502),
     (errors.ServerError(500, {"error": {"message": "private provider detail"}}), 502),
 ])
 def test_provider_errors(client, sdk, error, status):
