@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -130,3 +131,63 @@ def test_environment_loading(tmp_path, monkeypatch):
     assert "file-secret" not in repr(settings)
     monkeypatch.setenv("GEMINI_MODEL", "environment-model")
     assert Settings(_env_file=env).gemini_model == "environment-model"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("probable_specimen", "   "),
+    ("explanation", ""),
+    ("visible_structures", [1]),
+    ("visible_structures", [" "]),
+    ("observations", "not a list"),
+    ("limitations", []),
+    ("limitations", [" "]),
+    ("confidence", 99),
+])
+def test_schema_rejects_invalid_fields(client, sdk, field, value):
+    sdk.return_value = SimpleNamespace(text=json.dumps({**RESULT, field: value}))
+    assert upload(client).status_code == 502
+
+
+@pytest.mark.parametrize("field", list(RESULT))
+def test_schema_requires_every_field(client, sdk, field):
+    result = dict(RESULT)
+    del result[field]
+    sdk.return_value = SimpleNamespace(text=json.dumps(result))
+    assert upload(client).status_code == 502
+
+
+def test_no_discernible_structures_is_valid(client, sdk):
+    result = {**RESULT, "visible_structures": [], "observations": []}
+    sdk.return_value = SimpleNamespace(text=json.dumps(result))
+    response = upload(client)
+    assert response.status_code == 200
+    assert response.json() == result
+
+
+@pytest.mark.parametrize("extra_byte,status", [(0, 200), (1, 413)])
+def test_exact_upload_limit(client, sdk, extra_byte, status):
+    data = image_bytes()
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, gemini_api_key="test-key", max_image_bytes=len(data)
+    )
+    assert upload(client, data + b"x" * extra_byte).status_code == status
+    if extra_byte:
+        sdk.assert_not_called()
+
+
+def test_configured_model_is_used(client, sdk):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, gemini_api_key="test-key", gemini_model="configured-test-model"
+    )
+    assert upload(client).status_code == 200
+    assert sdk.call_args.kwargs["model"] == "configured-test-model"
+
+
+def test_animated_image_rejected(client, sdk):
+    stream = BytesIO()
+    Image.new("RGB", (8, 8), "white").save(
+        stream, format="PNG", save_all=True,
+        append_images=[Image.new("RGB", (8, 8), "black")], duration=100, loop=0,
+    )
+    assert upload(client, stream.getvalue()).status_code == 415
+    sdk.assert_not_called()

@@ -4,8 +4,31 @@
 
 Project planning and architecture completed.
 
-Backend environment configuration verified on 2026-09-06. Other implementation
-status is not reassessed in this configuration-only task.
+Backend environment configuration and the microscopy analysis flow are tested
+locally. Live Gemini analysis remains unverified because startup configuration
+validation does not currently pass.
+
+## Microscopy Analysis Verification (2026-09-06)
+
+- Dedicated Gemini service uses the existing configured key, model, and timeout;
+  the route handles upload orchestration without Gemini-specific logic.
+- POST /analyze returns the five-field Pydantic response in mocked SDK tests.
+- JPEG, PNG, and WebP uploads tested; empty, corrupt, mismatched, animated,
+  oversized, and excessive-pixel images rejected before Gemini calls.
+- Exact MAX_IMAGE_BYTES boundary accepted; one byte over rejected.
+- Missing response fields, extra fields, incorrect types, and blank list entries
+  rejected; empty visible-structure lists accepted for indiscernible images.
+- Educational prompt strengthened to put ambiguity and image-quality issues in
+  limitations and avoid claiming structures that are not discernible.
+- Full backend suite: 45 tests passed, preserving all existing tests. Two upstream
+  dependency deprecation warnings remain.
+- Real Onion1.jpg read from Git history and uploaded through /analyze with a mocked
+  Gemini response: HTTP 200 and response schema validation passed. This verifies
+  image handling, not actual specimen identification.
+- Live request could not start because configuration validation failed; no real
+  Gemini request was sent. backend/.env was not inspected or modified.
+- Upload size is checked after multipart parsing; a total HTTP request-body limit
+  is not implemented in this prototype.
 
 ## Environment Configuration Verification (2026-09-06)
 
