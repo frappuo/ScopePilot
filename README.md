@@ -32,7 +32,9 @@ Keep this terminal open. In a second PowerShell terminal:
 Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-Expected JSON: `{"status":"ok"}`. This checks backend liveness, not Gemini credentials or availability. Interactive API documentation: http://127.0.0.1:8000/docs.
+Startup fails clearly if `GEMINI_API_KEY` is missing or blank. The application loads user-managed `backend/.env` regardless of the working directory and never writes that file. Startup errors omit configuration values.
+
+Expected JSON: `{"status":"ok"}`. This checks backend liveness after configuration loads, not Gemini credential validity or availability. Interactive API documentation: http://127.0.0.1:8000/docs.
 
 ### Analyze a real image
 

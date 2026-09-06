@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +10,7 @@ class Settings(BaseSettings):
         env_file=Path(__file__).resolve().parents[1] / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     gemini_api_key: SecretStr = SecretStr("")
@@ -21,4 +22,12 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    try:
+        settings = Settings()
+    except (ValidationError, ValueError, OSError):
+        raise RuntimeError("Invalid backend environment configuration. Check your local settings.") from None
+    if not settings.gemini_api_key.get_secret_value().strip():
+        raise RuntimeError(
+            "GEMINI_API_KEY is required. Set it in the environment or user-managed backend/.env."
+        )
+    return settings
