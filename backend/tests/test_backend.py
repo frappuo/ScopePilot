@@ -22,7 +22,10 @@ RESULT = {
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setattr("app.main.get_settings", lambda: Settings(
+        _env_file=None, gemini_api_key="test-key"
+    ))
     app.dependency_overrides[get_settings] = lambda: Settings(
         _env_file=None, gemini_api_key="test-key"
     )
