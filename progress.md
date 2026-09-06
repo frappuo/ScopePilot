@@ -2,6 +2,21 @@
 
 ## Current Status
 
+Latest live verification: the real onion image returned HTTP 200 from /analyze
+and passed strict Pydantic validation using a process-only GEMINI_MODEL override
+to gemini-3.6-flash. GET /health returned 200. All 46 backend tests passed.
+
+Diagnosed two provider failures: HTTP 400 for additional_properties in the
+response_schema payload, then HTTP 404 because gemini-2.5-flash is unavailable
+to new users. The outgoing schema now omits that unsupported field while local
+validation still rejects extra fields. AFC is explicitly disabled. Provider 404
+responses now explain that GEMINI_MODEL needs updating.
+
+The existing user-managed model configuration was not changed. Normal startup
+requires a supported GEMINI_MODEL override or a user-managed configuration update.
+No .env contents or credentials were inspected or exposed. Earlier verification
+notes below record historical results and are superseded by this live check.
+
 Project planning and architecture completed.
 
 Backend environment configuration and the microscopy analysis flow are tested

@@ -25,6 +25,10 @@ def analyze_image(data: bytes, mime_type: str, settings: Settings) -> Analysis:
     key = settings.gemini_api_key.get_secret_value().strip()
     if not key:
         raise AnalysisError(503, "Gemini API key is not configured on the backend.")
+    # The provider's response_schema dialect rejects additionalProperties.
+    # Keep extra="forbid" in local validation of the returned JSON.
+    response_schema = Analysis.model_json_schema()
+    response_schema.pop("additionalProperties", None)
     try:
         with genai.Client(
             api_key=key,
@@ -39,13 +43,16 @@ def analyze_image(data: bytes, mime_type: str, settings: Settings) -> Analysis:
                 config=types.GenerateContentConfig(
                     system_instruction=PROMPT,
                     response_mime_type="application/json",
-                    response_schema=Analysis,
+                    response_schema=response_schema,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
         return Analysis.model_validate_json(response.text or "")
     except (httpx.TimeoutException, TimeoutError):
         raise AnalysisError(504, "Gemini request timed out. Please try again.") from None
     except errors.APIError as exc:
+        if exc.code == 404:
+            raise AnalysisError(502, "Configured Gemini model is unavailable. Update GEMINI_MODEL to a supported model.") from None
         if exc.code == 429:
             raise AnalysisError(503, "Gemini quota or rate limit reached. Try again later.") from None
         raise AnalysisError(502, "Gemini could not complete the analysis.") from None
