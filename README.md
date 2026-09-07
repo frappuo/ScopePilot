@@ -4,7 +4,7 @@ AI-assisted microscopy education. AI observations are tentative, require student
 
 ## Day 1 backend
 
-Implemented scope: FastAPI health and image-analysis endpoints. No frontend or later MVP features yet.
+Implemented scope: FastAPI health and image-analysis endpoints, plus an Expo gallery-to-analysis frontend. Later MVP features are not implemented.
 
 ### Setup (PowerShell, from repository root)
 
@@ -59,3 +59,52 @@ Pop-Location
 ```
 
 Tests mock Gemini at the SDK boundary, so they need no API key and do not verify live model quality or access. A successful real-image request with a configured key is still required to verify the live integration.
+
+## Frontend: phone image analysis
+
+The Expo TypeScript app selects one gallery image, previews it, uploads it, and displays Probable Specimen, Visible Structures, Observations, Explanation, and Limitations. It uses local React state and a dedicated API service. Gallery images are converted to JPEG at 90% quality and resized only when the longest edge exceeds 2400 pixels; no cropping is applied. Fine detail can be affected by this conversion and AI observations still need verification.
+
+Install from the repository root (Node.js 22.14+ and npm):
+
+```powershell
+Push-Location frontend
+npm.cmd ci
+Pop-Location
+```
+
+Start the backend from the repository root in one terminal. The process-only model override below uses the model verified with a live request; it does not change the user-managed backend configuration file.
+
+```powershell
+$env:GEMINI_MODEL = 'gemini-3.6-flash'
+.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000
+```
+
+Stop any older backend using that port first. Connect the phone and computer to the same trusted Wi-Fi. Find the computer's active Wi-Fi IPv4 address with `ipconfig`. If needed, allow Python through Windows Firewall on the private network. In a second terminal, replace `192.168.1.100` below with that address:
+
+```powershell
+Push-Location frontend
+$env:EXPO_PUBLIC_API_URL = 'http://192.168.1.100:8000'
+npm.cmd start -- --lan
+```
+
+Open the QR code in an Expo Go version compatible with SDK 57. On a physical phone, `localhost` and `127.0.0.1` point to the phone, not the computer. Verify `http://<computer-ip>:8000/health` in the phone browser if uploads cannot connect. For an Android emulator, the host is normally `10.0.2.2`.
+
+`EXPO_PUBLIC_API_URL` is a public backend address, not a secret. Never add Gemini credentials to the frontend. Restart Expo after changing the address. Requests time out after 90 seconds; image selection and analysis buttons are disabled while a request is running. Errors preserve the selected image for retry; selecting a new image clears the old result.
+
+Frontend checks (from `frontend`):
+
+```powershell
+npm.cmd run typecheck
+npm.cmd test
+npm.cmd run build
+```
+
+The build exports Android/iOS JavaScript and Hermes bundles plus a web preview into ignored `frontend/dist`; it does not produce an APK or IPA. API tests use mocked HTTP responses and do not call Gemini.
+
+Optional layout preview:
+
+```powershell
+npm.cmd run web
+```
+
+The intended upload target is the native phone app. The browser preview requires backend CORS support for cross-origin API requests; this parcel does not change backend CORS configuration.
