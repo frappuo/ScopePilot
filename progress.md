@@ -2,6 +2,29 @@
 
 ## Current Status
 
+## Frontend Parcel Verification (2026-09-06)
+
+- Expo SDK 57 TypeScript frontend initialized with a single analysis screen,
+  dedicated API service, gallery selection, JPEG preparation, preview, loading/error
+  states, and all five structured result sections.
+- `npm run typecheck`: passed.
+- `npm test`: 6 API-service tests passed (multipart upload, network failure,
+  provider failure, size rejection, malformed fields, and non-JSON response).
+- `npm run build`: Android and iOS Hermes bundles plus web export succeeded.
+  Native compilation required execution outside the filesystem sandbox.
+- Expo dev server ran on port 8081; browser preview rendered and the no-image
+  state correctly disabled Analyze. Layout inspected visually.
+- Physical-phone gallery permissions, JPEG conversion on-device, and a complete
+  phone-to-backend upload have not been verified. These require a compatible
+  Expo Go device and the LAN setup documented in README.md.
+- Browser preview API requests require backend CORS; backend was unchanged.
+- npm installation reported 10 moderate dependency vulnerabilities. No forced
+  dependency upgrades were applied. Expo's offline compatibility check reported
+  dependencies up to date (offline validation has limited coverage).
+- No backend code, backend/.env, camera capture, or later MVP features changed.
+
+## Backend Verification
+
 Latest live verification: the real onion image returned HTTP 200 from /analyze
 and passed strict Pydantic validation using a process-only GEMINI_MODEL override
 to gemini-3.6-flash. GET /health returned 200. All 46 backend tests passed.
