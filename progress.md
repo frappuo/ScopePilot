@@ -2,6 +2,58 @@
 
 ## Current Status
 
+## Educational Quiz Verification (2026-09-08)
+
+- Added `POST /quiz` using the current structured analysis as tentative context;
+  the image is not resent and `/analyze` and `/ask` behavior is unchanged.
+- Quiz responses are validated as exactly three questions with four unique
+  options each, an exact option match for `correct_answer`, and non-empty text.
+- A live local Gemini request returned HTTP 200 with three questions.
+- The frontend now displays one question at a time with local answer locking,
+  scoring, explanations, next-question progression, and quiz reset while
+  preserving the analysis and Q&A result.
+- Backend suite: 65 tests passed. Frontend suite: 36 tests passed. TypeScript
+  typecheck passed.
+- Web export passed. The all-platform export reached bundling but the local
+  Hermes compiler executable was denied permission by the environment.
+- Physical-iPhone quiz verification is still pending.
+
+## Q&A Keyboard Focus Scrolling (2026-09-07)
+
+- Replaced focus-time `scrollToEnd` behavior with measured scrolling for the
+  follow-up controls. The input container is measured in window coordinates and
+  the ScrollView moves only by the amount that overlaps the keyboard, retaining
+  a 32 px gap.
+- Answer arrival keeps its separate `scrollToEnd` behavior.
+- Frontend TypeScript typecheck passed and all 33 existing frontend tests passed.
+- Physical-iPhone verification is pending on the refreshed Metro bundle.
+
+## Follow-up Q&A Verification (2026-09-07)
+
+- `POST /ask` accepts the current structured analysis and a student question, then
+  returns a validated `answer` without resending or reanalyzing the image.
+- Gemini Q&A logic remains in the service layer. Its prompt treats the supplied
+  analysis as tentative context, distinguishes observations from general biology
+  knowledge, acknowledges uncertainty, and prohibits medical diagnosis.
+- A live request through the running FastAPI backend returned HTTP 200 with a
+  non-empty Gemini answer.
+- The frontend includes a multiline follow-up input, local loading and error states,
+  duplicate-submit prevention, and latest-answer display while preserving analysis.
+- The Q&A prompt now limits answers to the current microscopy analysis and related
+  biology. A live unrelated question returned the exact configured out-of-scope
+  sentence. A live relevant answer was non-empty and contained no Markdown heading
+  or emphasis markers.
+- A lightweight frontend sanitizer removes obvious Markdown headings and paired
+  emphasis markers and converts Markdown list markers to readable bullet lines.
+- The Q&A screen now uses React Native keyboard avoidance and explicit scrolling on
+  keyboard open and answer arrival. iOS bundling passed, but physical keyboard and
+  scroll behavior has not yet been verified.
+- Full backend suite: 54 tests passed. Frontend suite: 33 tests passed. TypeScript
+  typecheck and the iOS, Android, and web exports passed. Existing `/analyze` and
+  image-upload tests remain passing.
+- Physical-iPhone verification of the new Q&A controls is still pending; no phone
+  connected to the refreshed Metro bundle during this verification run.
+
 ## Frontend Parcel Verification (2026-09-06)
 
 - Expo SDK 57 TypeScript frontend initialized with a single analysis screen,

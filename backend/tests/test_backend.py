@@ -21,6 +21,44 @@ RESULT = {
     "limitations": ["Tentative AI output; verify with an instructor."],
 }
 
+QUIZ = {
+    "questions": [
+        {
+            "question": "Why might these cells appear rectangular?",
+            "options": [
+                "Rigid cell walls help maintain their shape",
+                "Nuclei force every cell into a square",
+                "Chloroplasts form the cell boundaries",
+                "Cytoplasm becomes crystalline",
+            ],
+            "correct_answer": "Rigid cell walls help maintain their shape",
+            "explanation": "Cell walls provide structural support and help maintain regular boundaries.",
+        },
+        {
+            "question": "Which observation is directly supported by the analysis?",
+            "options": [
+                "Rectangular cell outlines are visible",
+                "The tissue is diseased",
+                "Every nucleus is dividing",
+                "The sample came from a named organism",
+            ],
+            "correct_answer": "Rectangular cell outlines are visible",
+            "explanation": "Visible outlines are observations, while the other claims are unsupported.",
+        },
+        {
+            "question": "Why should this identification remain tentative?",
+            "options": [
+                "Image quality and view limits may hide useful details",
+                "Microscopy images always show bacteria",
+                "A model can verify every structure automatically",
+                "Limitations do not affect specimen identification",
+            ],
+            "correct_answer": "Image quality and view limits may hide useful details",
+            "explanation": "Limited visual evidence means the probable specimen needs verification.",
+        },
+    ]
+}
+
 
 @pytest.fixture
 def client(monkeypatch):
@@ -53,6 +91,14 @@ def image_bytes(fmt="PNG"):
 
 def upload(client, data=None, mime="image/png"):
     return client.post("/analyze", files={"image": ("sample", image_bytes() if data is None else data, mime)})
+
+
+def ask(client, question="Why do the cells appear rectangular?"):
+    return client.post("/ask", json={"analysis": RESULT, "question": question})
+
+
+def quiz_request(client, analysis=RESULT):
+    return client.post("/quiz", json={"analysis": analysis})
 
 
 def test_health(client):
@@ -195,3 +241,115 @@ def test_animated_image_rejected(client, sdk):
     )
     assert upload(client, stream.getvalue()).status_code == 415
     sdk.assert_not_called()
+
+
+def test_ask_success_uses_tentative_analysis_context(client, sdk):
+    sdk.return_value = SimpleNamespace(text="Rigid plant cell walls can produce a rectangular appearance.")
+    response = ask(client)
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "Rigid plant cell walls can produce a rectangular appearance."
+    }
+    args = sdk.call_args.kwargs
+    assert args["model"] == "gemini-2.5-flash"
+    assert RESULT["probable_specimen"] in args["contents"]
+    assert "Why do the cells appear rectangular?" in args["contents"]
+    assert args["config"].automatic_function_calling.disable is True
+    assert "tentative" in args["config"].system_instruction.lower()
+    assert "medical diagnosis" in args["config"].system_instruction.lower()
+    assert "clean plain text, not markdown" in args["config"].system_instruction.lower()
+    assert "markdown heading markers" in args["config"].system_instruction.lower()
+
+
+def test_ask_returns_exact_out_of_scope_model_response(client, sdk):
+    message = "This question is outside the scope of the current microscopy analysis."
+    sdk.return_value = SimpleNamespace(text=message)
+    response = ask(client, "Who won the football match?")
+    assert response.status_code == 200
+    assert response.json() == {"answer": message}
+    prompt = sdk.call_args.kwargs["config"].system_instruction
+    assert message in prompt
+    assert "clearly unrelated to microscopy or biology" in prompt
+
+
+@pytest.mark.parametrize("question", ["", "   "])
+def test_ask_rejects_blank_question(client, sdk, question):
+    assert ask(client, question).status_code == 422
+    sdk.assert_not_called()
+
+
+def test_ask_provider_failure_is_safe(client, sdk):
+    sdk.side_effect = errors.ServerError(
+        500, {"error": {"message": "private provider detail"}}
+    )
+    response = ask(client)
+    assert response.status_code == 502
+    assert "private provider detail" not in response.text
+
+
+@pytest.mark.parametrize("text", [None, "", "   "])
+def test_ask_rejects_empty_model_response(client, sdk, text):
+    sdk.return_value = SimpleNamespace(text=text)
+    assert ask(client).status_code == 502
+
+
+def test_quiz_success_uses_current_analysis(client, sdk):
+    sdk.return_value = SimpleNamespace(text=json.dumps(QUIZ))
+    response = quiz_request(client)
+    assert response.status_code == 200
+    assert response.json() == QUIZ
+    args = sdk.call_args.kwargs
+    assert args["model"] == "gemini-2.5-flash"
+    assert RESULT["probable_specimen"] in args["contents"]
+    assert args["config"].automatic_function_calling.disable is True
+    assert args["config"].response_mime_type == "application/json"
+    assert args["config"].response_schema == gemini._quiz_response_schema()
+    prompt = args["config"].system_instruction.lower()
+    assert "exactly 3" in prompt
+    assert "exactly 4" in prompt
+    assert "tentative" in prompt
+    assert "medical diagnosis" in prompt
+
+
+@pytest.mark.parametrize("questions", [QUIZ["questions"][:2], QUIZ["questions"] + [QUIZ["questions"][0]]])
+def test_quiz_requires_exactly_three_questions(client, sdk, questions):
+    sdk.return_value = SimpleNamespace(text=json.dumps({"questions": questions}))
+    assert quiz_request(client).status_code == 502
+
+
+def test_quiz_rejects_invalid_question_shape(client, sdk):
+    invalid = json.loads(json.dumps(QUIZ))
+    invalid["questions"][0]["options"] = ["only one"]
+    sdk.return_value = SimpleNamespace(text=json.dumps(invalid))
+    assert quiz_request(client).status_code == 502
+
+
+@pytest.mark.parametrize("change", [
+    {"duplicate_options": True},
+    {"blank_option": True},
+    {"wrong_correct_answer": True},
+])
+def test_quiz_rejects_invalid_options_and_answer(client, sdk, change):
+    invalid = json.loads(json.dumps(QUIZ))
+    question = invalid["questions"][0]
+    if change.get("duplicate_options"):
+        question["options"][1] = question["options"][0]
+    if change.get("blank_option"):
+        question["options"][1] = "   "
+    if change.get("wrong_correct_answer"):
+        question["correct_answer"] = "Not an option"
+    sdk.return_value = SimpleNamespace(text=json.dumps(invalid))
+    assert quiz_request(client).status_code == 502
+
+
+def test_quiz_provider_failure_is_safe(client, sdk):
+    sdk.side_effect = errors.ServerError(500, {"error": {"message": "private provider detail"}})
+    response = quiz_request(client)
+    assert response.status_code == 502
+    assert "private provider detail" not in response.text
+
+
+@pytest.mark.parametrize("text", [None, "", "not json"])
+def test_quiz_rejects_empty_or_malformed_model_response(client, sdk, text):
+    sdk.return_value = SimpleNamespace(text=text)
+    assert quiz_request(client).status_code == 502
