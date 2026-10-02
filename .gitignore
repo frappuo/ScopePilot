@@ -8,3 +8,15 @@ __pycache__/
 .local/
 node_modules/
 .expo/
+
+# Office lock files
+~$*
+
+# Claude Code local
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Personal test photos
+backend/evals/images/IMG_*
+*.MOV
+*.mov
