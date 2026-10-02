@@ -64,6 +64,36 @@ test('oversized uploads give a specific error', async () => {
   global.fetch = async () => new Response('', { status: 413 });
   await assert.rejects(analyzeImage(image), /too large/);
 });
+test('validation errors include the backend detail', async () => {
+  global.fetch = async () => Response.json({ detail: 'Image content does not match its declared type.' }, { status: 415 });
+  await assert.rejects(analyzeImage(image), {
+    message: 'This image format is not supported. Please choose another image. Details: Image content does not match its declared type.',
+  });
+});
+test('native upload validation errors include the backend detail', async () => {
+  const detail = 'Image resolution exceeds the limit of 20,000,000 pixels. Choose a smaller image or lower the camera resolution.';
+  nativeUpload = async () => ({ status: 413, body: JSON.stringify({ detail }), headers: { 'content-type': 'application/json' } });
+  await assert.rejects(analyzeImage({ uri: 'file:///image.jpg', name: 'image.jpg', type: 'image/jpeg' }), {
+    message: `This image is too large for the backend. Please choose a smaller image. Details: ${detail}`,
+  });
+});
+test('server error details are never shown', async () => {
+  global.fetch = async () => Response.json({ detail: 'private provider detail' }, { status: 502 });
+  await assert.rejects(analyzeImage(image), error => {
+    assert.match(error.message, /analysis service could not complete/);
+    assert.equal(error.message.includes('private provider detail'), false);
+    return true;
+  });
+});
+test('unusable validation details fall back to the mapped message', async () => {
+  const unsupported = 'This image format is not supported. Please choose another image.';
+  global.fetch = async () => new Response('not json', { status: 415 });
+  await assert.rejects(analyzeImage(image), { message: unsupported });
+  global.fetch = async () => Response.json({ detail: 'x'.repeat(201) }, { status: 415 });
+  await assert.rejects(analyzeImage(image), { message: unsupported });
+  global.fetch = async () => Response.json({ detail: 42 }, { status: 400 });
+  await assert.rejects(analyzeImage(image), { message: 'This image could not be read. Please choose another image.' });
+});
 test('malformed result is rejected before display', async () => {
   global.fetch = async () => Response.json({ ...result, visible_structures: [123] });
   await assert.rejects(analyzeImage(image), /incomplete result/);

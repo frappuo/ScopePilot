@@ -75,6 +75,18 @@ function isAnalysis(value: unknown): value is Analysis {
     );
 }
 
+// Only short backend validation messages are shown; other bodies never reach the UI.
+async function validationDetail(response: Response): Promise<string | undefined> {
+  try {
+    const detail = ((await response.json()) as { detail?: unknown } | null)?.detail;
+    if (typeof detail !== 'string') return undefined;
+    const trimmed = detail.trim();
+    return trimmed && trimmed.length <= 200 ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
   const baseUrl = resolveApiUrl();
   const endpoint = `${baseUrl}/analyze`;
@@ -128,7 +140,9 @@ export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
         503: 'The analysis service is unavailable. Please try again later.',
         504: 'Analysis took too long. Please try again.',
       };
-      throw new Error(messages[response.status] ?? `Analysis failed (HTTP ${response.status}). Please try again.`);
+      const message = messages[response.status] ?? `Analysis failed (HTTP ${response.status}). Please try again.`;
+      const detail = [400, 413, 415].includes(response.status) ? await validationDetail(response) : undefined;
+      throw new Error(detail ? `${message} Details: ${detail}` : message);
     }
     let result: unknown;
     try { result = await response.json(); }
