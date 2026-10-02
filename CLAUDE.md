@@ -25,7 +25,7 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 - Run relevant tests/build after edits, report commands and results, and never claim something works unless it was run.
 
 ## Known facts
-- iPhone camera JPEGs are detected by Pillow as format MPO (2 frames); the validator must accept them as JPEG (open bug until fixed).
+- iPhone camera JPEGs are detected by Pillow as format MPO (2 frames); `prepare_image` accepts them as JPEG, uses only the first frame and re-encodes it (fixed with synthetic tests; not yet verified with a real iPhone upload).
 - Frontend reads the API base URL from EXPO_PUBLIC_API_URL (frontend/.env). The README is partly stale.
 
 ## Honesty rules
