@@ -19,7 +19,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.config import get_settings  # noqa: E402
 import app.services.gemini as gemini_service  # noqa: E402
-from app.services.images import validate_image  # noqa: E402
+from app.services.images import prepare_image  # noqa: E402
 
 
 SUPPORTED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -226,7 +226,10 @@ def analyze_case(
     if mime_type not in SUPPORTED_MIME_TYPES:
         raise ValueError("Eval images must be JPEG, PNG, or WebP files")
 
-    validate_image(data, mime_type, settings)
+    # From this commit onward, evals send the re-encoded, metadata-stripped bytes
+    # that production sends to Gemini, so results are not directly comparable
+    # with earlier eval runs.
+    data, mime_type = prepare_image(data, mime_type, settings)
     analysis = _analyze_with_prompt(data, mime_type, settings, prompt_variant)
     return analysis.model_dump()
 
