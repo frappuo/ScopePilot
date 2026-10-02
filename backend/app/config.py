@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     gemini_timeout_seconds: int = Field(default=60, gt=0, le=300)
     max_image_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     max_image_pixels: int = Field(default=20_000_000, gt=0)
+    # Re-encoded bytes sent to Gemini; 14 MiB is ~18.7 MiB as base64,
+    # under Gemini's ~20 MB inline request limit.
+    max_encoded_image_bytes: int = Field(default=14 * 1024 * 1024, gt=0)
 
 
 @lru_cache
