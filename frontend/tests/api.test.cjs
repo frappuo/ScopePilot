@@ -26,11 +26,12 @@ const compiled = ts.transpileModule(fs.readFileSync('src/services/api.ts', 'utf8
 const loaded = new Module('api-test');
 loaded._compile(compiled, 'api-test.cjs');
 Module._load = originalLoad;
-const { analyzeImage, askQuestion, generateQuiz, checkBackendHealth, checkBackendPost, sanitizeAnswer } = loaded.exports;
+const { analyzeImage, askQuestion, generateQuiz, sanitizeAnswer } = loaded.exports;
 const originalFetch = global.fetch;
 afterEach(() => {
   global.fetch = originalFetch;
   process.env.EXPO_PUBLIC_API_URL = 'http://localhost:8000/';
+  delete process.env.EXPO_PUBLIC_APP_TOKEN;
   nativeUpload = undefined;
   nativeFileUris.length = 0;
 });
@@ -137,67 +138,13 @@ test('configuration diagnostics distinguish missing and invalid values without l
   context.mock.method(console, 'info', (...args) => logs.push(args));
   global.fetch = async () => { assert.fail('Invalid configuration must not send a request'); };
   delete process.env.EXPO_PUBLIC_API_URL;
-  assert.match(await checkBackendHealth(), /not configured/);
+  await assert.rejects(analyzeImage(image), /not configured/);
   process.env.EXPO_PUBLIC_API_URL = 'malformed-value';
-  assert.match(await checkBackendHealth(), /Invalid backend address/);
+  await assert.rejects(analyzeImage(image), /Invalid backend address/);
   assert.deepEqual(logs, [
     ['[ScopePilot API]', { category: 'configuration_missing' }],
     ['[ScopePilot API]', { category: 'configuration_invalid' }],
   ]);
-});
-
-test('health diagnostic uses GET with no body or headers', async () => {
-  global.fetch = async (url, options) => {
-    assert.equal(url, 'http://localhost:8000/health');
-    assert.equal(options.method, 'GET');
-    assert.equal(options.body, undefined);
-    assert.equal(options.headers, undefined);
-    return new Response('', { status: 200 });
-  };
-  assert.match(await checkBackendHealth(), /HTTP 200/);
-});
-test('health diagnostic preserves non-200 HTTP status', async () => {
-  global.fetch = async () => new Response('', { status: 503 });
-  assert.match(await checkBackendHealth(), /HTTP 503/);
-});
-test('health diagnostic sanitizes transport errors', async () => {
-  global.fetch = async () => { throw new Error('private details'); };
-  assert.match(await checkBackendHealth(), /No HTTP response \(transport\)/);
-});
-test('health diagnostic times out after five seconds', async (context) => {
-  context.mock.timers.enable({ apis: ['setTimeout'] });
-  global.fetch = async (_, options) => new Promise((resolve, reject) => {
-    options.signal.addEventListener('abort', () => reject(new Error('aborted')));
-  });
-  const pending = checkBackendHealth();
-  context.mock.timers.tick(5000);
-  assert.match(await pending, /No HTTP response \(timeout\)/);
-});
-
-test('POST diagnostic sends no body or headers and recognizes expected 422', async () => {
-  global.fetch = async (url, options) => {
-    assert.equal(url, 'http://localhost:8000/analyze');
-    assert.equal(options.method, 'POST');
-    assert.equal(options.body, undefined);
-    assert.equal(options.headers, undefined);
-    return new Response('', { status: 422 });
-  };
-  assert.match(await checkBackendPost(), /HTTP 422 — POST reaches FastAPI/);
-});
-test('POST diagnostic distinguishes transport rejection from HTTP response', async () => {
-  global.fetch = async () => { throw new Error('private details'); };
-  assert.match(await checkBackendPost(), /No HTTP response \(transport\) for POST/);
-  global.fetch = async () => new Response('', { status: 503 });
-  assert.match(await checkBackendPost(), /HTTP 503/);
-});
-test('POST diagnostic has a five-second timeout', async (context) => {
-  context.mock.timers.enable({ apis: ['setTimeout'] });
-  global.fetch = async (_, options) => new Promise((resolve, reject) => {
-    options.signal.addEventListener('abort', () => reject(new Error('aborted')));
-  });
-  const pending = checkBackendPost();
-  context.mock.timers.tick(5000);
-  assert.match(await pending, /No HTTP response \(timeout\) for POST/);
 });
 
 test('native multipart uses the image field and MIME type and returns structured results', async (context) => {
@@ -320,4 +267,111 @@ test('quiz provider and transport failures preserve safe errors', async () => {
   await assert.rejects(generateQuiz(result), /could not generate a quiz/);
   global.fetch = async () => { throw new Error('private transport detail'); };
   await assert.rejects(generateQuiz(result), /Could not reach the quiz service/);
+});
+
+const TOKEN = 'dummy-app-token-for-tests';
+const nativeImage = { uri: 'file:///image.jpg', name: 'image.jpg', type: 'image/jpeg' };
+const jsonOk = url => url.endsWith('/analyze') ? Response.json(result)
+  : url.endsWith('/ask') ? Response.json({ answer: 'An answer.' }) : Response.json(quiz);
+
+test('app token header is sent on every request when configured', async () => {
+  process.env.EXPO_PUBLIC_APP_TOKEN = `  ${TOKEN}  `;
+  const seen = [];
+  global.fetch = async (url, options) => { seen.push([url, options.headers]); return jsonOk(url); };
+  await analyzeImage(image);
+  await askQuestion(result, 'Why?');
+  await generateQuiz(result);
+  assert.deepEqual(seen, [
+    ['http://localhost:8000/analyze', { 'X-ScopePilot-Token': TOKEN }],
+    ['http://localhost:8000/ask', { 'Content-Type': 'application/json', 'X-ScopePilot-Token': TOKEN }],
+    ['http://localhost:8000/quiz', { 'Content-Type': 'application/json', 'X-ScopePilot-Token': TOKEN }],
+  ]);
+  nativeUpload = async (_, options) => {
+    assert.deepEqual(options.headers, { 'X-ScopePilot-Token': TOKEN });
+    return { status: 200, body: JSON.stringify(result), headers: {} };
+  };
+  assert.deepEqual(await analyzeImage(nativeImage), result);
+});
+
+for (const value of [undefined, '   ']) {
+  test(`no app token header when the variable is ${value === undefined ? 'unset' : 'blank'}`, async () => {
+    if (value !== undefined) process.env.EXPO_PUBLIC_APP_TOKEN = value;
+    const seen = [];
+    global.fetch = async (url, options) => { seen.push(options.headers); return jsonOk(url); };
+    await analyzeImage(image);
+    await askQuestion(result, 'Why?');
+    await generateQuiz(result);
+    assert.deepEqual(seen, [undefined, { 'Content-Type': 'application/json' }, { 'Content-Type': 'application/json' }]);
+    nativeUpload = async (_, options) => {
+      assert.equal('headers' in options, false);
+      return { status: 200, body: JSON.stringify(result), headers: {} };
+    };
+    await analyzeImage(nativeImage);
+  });
+}
+
+const calls = [
+  ['analyze (web)', () => analyzeImage(image)],
+  ['analyze (native)', () => analyzeImage(nativeImage)],
+  ['ask', () => askQuestion(result, 'Why?')],
+  ['quiz', () => generateQuiz(result)],
+];
+function respondWith(status, body) {
+  global.fetch = async () => new Response(body, { status, headers: { 'content-type': 'application/json' } });
+  nativeUpload = async () => ({ status, body, headers: { 'content-type': 'application/json' } });
+}
+
+for (const [status, message] of [
+  [401, "This app version can't reach the service. Please update the app."],
+  [429, 'Too many requests right now. Please wait a minute and try again.'],
+]) {
+  test(`${status} has a fixed message on every call`, async () => {
+    for (const [, call] of calls) {
+      respondWith(status, JSON.stringify({ detail: 'private backend detail' }));
+      await assert.rejects(call(), { message });
+    }
+  });
+}
+
+test('daily-cap 503 shows a fixed app message; other 503 bodies are never shown', async () => {
+  const daily = "Today's ScopePilot analysis limit has been reached. Please try again tomorrow (the limit resets at 00:00 UTC).";
+  for (const [, call] of calls) {
+    respondWith(503, JSON.stringify({ detail: 'Daily Gemini request limit for this server reached. Try again after 00:00 UTC.' }));
+    await assert.rejects(call(), { message: daily });
+    respondWith(503, JSON.stringify({ detail: 'private provider detail' }));
+    await assert.rejects(call(), error => {
+      assert.match(error.message, /unavailable\. Please try again later/);
+      assert.equal(error.message.includes('private provider detail'), false);
+      return true;
+    });
+  }
+});
+
+test('ask and quiz have specific 413 and 422 messages', async () => {
+  const detail = 'Request body exceeds the 65,536-byte limit.';
+  respondWith(413, JSON.stringify({ detail }));
+  await assert.rejects(askQuestion(result, 'Why?'), {
+    message: `This question and analysis are too large to send. Please analyze the image again. Details: ${detail}`,
+  });
+  await assert.rejects(generateQuiz(result), {
+    message: `This analysis is too large to create a quiz from. Please analyze the image again. Details: ${detail}`,
+  });
+  respondWith(422, JSON.stringify({ detail: [{ loc: ['body', 'analysis', 'explanation'], msg: 'private validation text' }] }));
+  await assert.rejects(generateQuiz(result), { message: "This analysis can't be used for a quiz. Please analyze the image again." });
+});
+
+test('ask 422 separates a too-long question from analysis caps without showing backend text', async () => {
+  const neutral = 'This request could not be processed. Please analyze the image again.';
+  const error = (...loc) => ({ loc, msg: 'private validation text', type: 'string_too_long' });
+  respondWith(422, JSON.stringify({ detail: [error('body', 'question')] }));
+  await assert.rejects(askQuestion(result, 'Why?'), { message: 'Please enter a question of up to 500 characters.' });
+  for (const body of [
+    JSON.stringify({ detail: [error('body', 'analysis', 'explanation')] }),
+    JSON.stringify({ detail: [error('body', 'question'), error('body', 'analysis', 'observations', 0)] }),
+    JSON.stringify({ detail: [] }),
+    'not json',
+  ]) {
+    respondWith(422, body);
+    await assert.rejects(askQuestion(result, 'Why?'), { message: neutral });
+  }
 });

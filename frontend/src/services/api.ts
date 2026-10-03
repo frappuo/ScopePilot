@@ -27,42 +27,11 @@ function diagnostic(details: { baseUrl?: string; endpoint?: string; status?: num
   if (typeof __DEV__ !== 'undefined' && __DEV__) console.info('[ScopePilot API]', details);
 }
 
-// Temporary native-network diagnostic; independent of image upload.
-export async function checkBackendHealth(): Promise<string> {
-  return checkConnection('GET');
-}
-
-export async function checkBackendPost(): Promise<string> {
-  return checkConnection('POST');
-}
-
-async function checkConnection(method: 'GET' | 'POST'): Promise<string> {
-  let endpoint: string;
-  try { endpoint = `${resolveApiUrl()}/${method === 'GET' ? 'health' : 'analyze'}`; }
-  catch (error) {
-    return `No request sent: ${(error as Error).message}`;
-  }
-  diagnostic({ endpoint });
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5_000);
-  try {
-    const response = await fetch(endpoint, { method, signal: controller.signal });
-    diagnostic({ status: response.status });
-    if (method === 'POST') {
-      return response.status === 422
-        ? 'HTTP 422 — POST reaches FastAPI without an image. Next: image URI and multipart diagnostics.'
-        : `HTTP ${response.status} — POST received an HTTP response; expected 422 for the missing image.`;
-    }
-    return response.status === 200
-      ? 'HTTP 200 — Expo native networking works. Next: upload diagnostics.'
-      : `HTTP ${response.status} — an HTTP response was received; check the health endpoint.`;
-  } catch {
-    const category = controller.signal.aborted ? 'timeout' : 'transport';
-    diagnostic({ category });
-    return method === 'GET'
-      ? `No HTTP response (${category}). Check Expo Go local-network permission / iOS transport first.`
-      : `No HTTP response (${category}) for POST without an image. Image serialization is not involved in this failure.`;
-  } finally { clearTimeout(timer); }
+// Static process.env.EXPO_PUBLIC_* access so Expo inlines it at build time. The token
+// ships inside the app bundle: it deters casual clients and is not authentication.
+function tokenHeaders(): Record<string, string> {
+  const token = process.env.EXPO_PUBLIC_APP_TOKEN?.trim();
+  return token ? { 'X-ScopePilot-Token': token } : {};
 }
 
 function isAnalysis(value: unknown): value is Analysis {
@@ -87,6 +56,42 @@ async function validationDetail(response: Response): Promise<string | undefined>
   }
 }
 
+const UNAUTHORIZED = "This app version can't reach the service. Please update the app.";
+const TOO_MANY_REQUESTS = 'Too many requests right now. Please wait a minute and try again.';
+const DAILY_LIMIT = "Today's ScopePilot analysis limit has been reached. Please try again tomorrow (the limit resets at 00:00 UTC).";
+
+// Recognises the backend's daily-cap 503; its text is matched, never displayed.
+async function isDailyLimit(response: Response): Promise<boolean> {
+  if (response.status !== 503) return false;
+  try {
+    const detail = ((await response.json()) as { detail?: unknown } | null)?.detail;
+    return typeof detail === 'string' && detail.startsWith('Daily Gemini request limit');
+  } catch {
+    return false;
+  }
+}
+
+// Backend detail text is shown only for 400/413/415; other bodies never reach the UI.
+async function errorMessage(response: Response, messages: Record<number, string>, fallback: string): Promise<string> {
+  if (await isDailyLimit(response)) return DAILY_LIMIT;
+  const message = ({ 401: UNAUTHORIZED, 429: TOO_MANY_REQUESTS, ...messages } as Record<number, string>)[response.status] ?? fallback;
+  const detail = [400, 413, 415].includes(response.status) ? await validationDetail(response) : undefined;
+  return detail ? `${message} Details: ${detail}` : message;
+}
+
+// FastAPI 422 bodies list error locations; true when every error is on the question field.
+async function onlyQuestionInvalid(response: Response): Promise<boolean> {
+  try {
+    const detail = ((await response.json()) as { detail?: unknown } | null)?.detail;
+    return Array.isArray(detail) && detail.length > 0 && detail.every((error: unknown) => {
+      const loc = (error as { loc?: unknown } | null)?.loc;
+      return Array.isArray(loc) && loc[0] === 'body' && loc[1] === 'question';
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
   const baseUrl = resolveApiUrl();
   const endpoint = `${baseUrl}/analyze`;
@@ -100,6 +105,8 @@ export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
   });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
+  const auth = tokenHeaders();
+  const authOption = Object.keys(auth).length ? { headers: auth } : {};
   try {
     let response: Response;
     try {
@@ -107,7 +114,7 @@ export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
         // Web: fetch supplies the multipart boundary; do not set Content-Type.
         const body = new FormData();
         body.append('image', image.blob, image.name);
-        response = await fetch(endpoint, { method: 'POST', body, signal: controller.signal });
+        response = await fetch(endpoint, { method: 'POST', body, signal: controller.signal, ...authOption });
       } else {
         // Native: use the file-aware uploader rather than a React Native URI FormData part.
         const upload = await new File(image.uri).upload(endpoint, {
@@ -117,6 +124,7 @@ export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
           mimeType: image.type,
           sessionType: 'foreground',
           signal: controller.signal,
+          ...authOption,
         });
         response = new Response(upload.body, {
           status: upload.status,
@@ -140,9 +148,7 @@ export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
         503: 'The analysis service is unavailable. Please try again later.',
         504: 'Analysis took too long. Please try again.',
       };
-      const message = messages[response.status] ?? `Analysis failed (HTTP ${response.status}). Please try again.`;
-      const detail = [400, 413, 415].includes(response.status) ? await validationDetail(response) : undefined;
-      throw new Error(detail ? `${message} Details: ${detail}` : message);
+      throw new Error(await errorMessage(response, messages, `Analysis failed (HTTP ${response.status}). Please try again.`));
     }
     let result: unknown;
     try { result = await response.json(); }
@@ -175,7 +181,7 @@ export async function askQuestion(analysis: Analysis, question: string): Promise
     try {
       response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...tokenHeaders() },
         body: JSON.stringify({ analysis, question: trimmedQuestion }),
         signal: controller.signal,
       });
@@ -186,14 +192,20 @@ export async function askQuestion(analysis: Analysis, question: string): Promise
         : 'Could not reach the question service. Check the backend connection and try again.');
     }
     diagnostic({ status: response.status });
+    if (response.status === 422) {
+      // Tell a too-long question apart from analysis caps without showing backend text.
+      throw new Error(await onlyQuestionInvalid(response)
+        ? 'Please enter a question of up to 500 characters.'
+        : 'This request could not be processed. Please analyze the image again.');
+    }
     if (!response.ok) {
       const messages: Record<number, string> = {
-        422: 'Enter a valid question about this analysis.',
+        413: 'This question and analysis are too large to send. Please analyze the image again.',
         502: 'The question service could not produce an answer. Please try again.',
         503: 'The question service is unavailable. Please try again later.',
         504: 'The answer took too long. Please try again.',
       };
-      throw new Error(messages[response.status] ?? `Question failed (HTTP ${response.status}). Please try again.`);
+      throw new Error(await errorMessage(response, messages, `Question failed (HTTP ${response.status}). Please try again.`));
     }
     let result: unknown;
     try { result = await response.json(); }
@@ -238,7 +250,7 @@ export async function generateQuiz(analysis: Analysis): Promise<Quiz> {
     try {
       response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...tokenHeaders() },
         body: JSON.stringify({ analysis }),
         signal: controller.signal,
       });
@@ -251,11 +263,13 @@ export async function generateQuiz(analysis: Analysis): Promise<Quiz> {
     diagnostic({ status: response.status });
     if (!response.ok) {
       const messages: Record<number, string> = {
+        413: 'This analysis is too large to create a quiz from. Please analyze the image again.',
+        422: "This analysis can't be used for a quiz. Please analyze the image again.",
         502: 'The quiz service could not generate a quiz. Please try again.',
         503: 'The quiz service is unavailable. Please try again later.',
         504: 'The quiz took too long. Please try again.',
       };
-      throw new Error(messages[response.status] ?? `Quiz failed (HTTP ${response.status}). Please try again.`);
+      throw new Error(await errorMessage(response, messages, `Quiz failed (HTTP ${response.status}). Please try again.`));
     }
     let result: unknown;
     try { result = await response.json(); }

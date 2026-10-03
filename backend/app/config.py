@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     max_json_body_bytes: int = Field(default=64 * 1024, gt=0)
     # Gemini attempts per UTC day in this process; fallback attempts count.
     gemini_daily_call_limit: int = Field(default=100, gt=0)
+    # Shared app token (X-ScopePilot-Token). Empty disables the check. It ships
+    # inside the app bundle, so it deters casual clients; it is not authentication.
+    app_token: SecretStr = SecretStr("")
     # Comma-separated; a str because pydantic-settings would JSON-decode a list.
     # Tried in order after gemini_model, only on quota (429) or missing model (404).
     gemini_fallback_models: str = ""
