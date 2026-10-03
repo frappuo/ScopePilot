@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,20 @@ class Settings(BaseSettings):
     # Re-encoded bytes sent to Gemini; 14 MiB is ~18.7 MiB as base64,
     # under Gemini's ~20 MB inline request limit.
     max_encoded_image_bytes: int = Field(default=14 * 1024 * 1024, gt=0)
+    # Comma-separated; a str because pydantic-settings would JSON-decode a list.
+    # Tried in order after gemini_model, only on quota (429) or missing model (404).
+    gemini_fallback_models: str = ""
+
+    @property
+    def fallback_models(self) -> tuple[str, ...]:
+        names = dict.fromkeys(name.strip() for name in self.gemini_fallback_models.split(","))
+        return tuple(name for name in names if name and name != self.gemini_model.strip())
+
+    @model_validator(mode="after")
+    def _limit_fallback_models(self) -> "Settings":
+        if len(self.fallback_models) > 3:
+            raise ValueError("GEMINI_FALLBACK_MODELS accepts at most 3 models.")
+        return self
 
 
 @lru_cache

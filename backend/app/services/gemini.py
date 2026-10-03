@@ -1,6 +1,8 @@
+from collections.abc import Callable
 import logging
 import re
 from threading import Lock
+from typing import TypeVar
 
 import httpx
 from google import genai
@@ -156,14 +158,33 @@ def _quiz_response_schema() -> dict:
     return schema
 
 
-def analyze_image(data: bytes, mime_type: str, settings: Settings) -> Analysis:
+_FALLBACK_CODES = {429: "quota", 404: "model_not_found"}
+_FALLBACK_STATUSES = {"RESOURCE_EXHAUSTED": "quota", "NOT_FOUND": "model_not_found"}
+T = TypeVar("T")
+
+
+def _fallback_reason(exc: errors.APIError) -> str | None:
+    """Only quota exhaustion or a missing model justify trying the next model."""
+    return _FALLBACK_CODES.get(exc.code) or _FALLBACK_STATUSES.get(str(exc.status or "").upper())
+
+
+def _generate(
+    operation: str,
+    settings: Settings,
+    *,
+    contents: object,
+    config: types.GenerateContentConfig,
+    parse: Callable[[types.GenerateContentResponse], T],
+    failure_message: str,
+    invalid_message: str,
+    allow_fallback: bool = True,
+) -> T:
+    """Call Gemini with the configured model, then fallbacks on quota/model-not-found only."""
     key = settings.gemini_api_key.get_secret_value().strip()
     if not key:
         raise AnalysisError(503, "Gemini API key is not configured on the backend.")
-    # The provider's response_schema dialect rejects additionalProperties.
-    # Keep extra="forbid" in local validation of the returned JSON.
-    response_schema = Analysis.model_json_schema()
-    response_schema.pop("additionalProperties", None)
+    models = [settings.gemini_model, *(settings.fallback_models if allow_fallback else ())]
+    quota_hit = False
     try:
         with genai.Client(
             api_key=key,
@@ -172,120 +193,112 @@ def analyze_image(data: bytes, mime_type: str, settings: Settings) -> Analysis:
                 retry_options=types.HttpRetryOptions(attempts=1),
             ),
         ) as client:
-            response = client.models.generate_content(
-                model=settings.gemini_model,
-                contents=[types.Part.from_bytes(data=data, mime_type=mime_type)],
-                config=types.GenerateContentConfig(
-                    system_instruction=PROMPT,
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                ),
-            )
-        return Analysis.model_validate_json(response.text or "")
+            for index, model in enumerate(models):
+                try:
+                    response = client.models.generate_content(model=model, contents=contents, config=config)
+                except errors.APIError as exc:
+                    reason = _fallback_reason(exc)
+                    if reason is None:
+                        raise
+                    quota_hit = quota_hit or reason == "quota"
+                    _log_gemini_failure(operation, exc, "provider", include_provider_details=reason == "quota")
+                    if index + 1 < len(models):
+                        logger.warning(
+                            "Gemini fallback operation=%s from_model=%s to_model=%s reason=%s",
+                            operation,
+                            _safe_diagnostic_value(model),
+                            _safe_diagnostic_value(models[index + 1]),
+                            reason,
+                        )
+                        continue
+                    if quota_hit:
+                        raise AnalysisError(503, "Gemini quota or rate limit reached. Try again later.") from None
+                    raise AnalysisError(
+                        502,
+                        "Configured Gemini model is unavailable. "
+                        "Update GEMINI_MODEL or GEMINI_FALLBACK_MODELS to a supported model.",
+                    ) from None
+                # Invalid or empty output is never retried on another model.
+                result = parse(response)
+                logger.info(
+                    "Gemini served operation=%s model=%s fallback_used=%s",
+                    operation, _safe_diagnostic_value(model), index > 0,
+                )
+                return result
     except (httpx.TimeoutException, TimeoutError) as exc:
-        _log_gemini_failure("analyze", exc, "timeout")
+        _log_gemini_failure(operation, exc, "timeout")
         raise AnalysisError(504, "Gemini request timed out. Please try again.") from None
     except errors.APIError as exc:
-        _log_gemini_failure("analyze", exc, "provider", include_provider_details=exc.code == 429)
-        if exc.code == 404:
-            raise AnalysisError(502, "Configured Gemini model is unavailable. Update GEMINI_MODEL to a supported model.") from None
-        if exc.code == 429:
-            raise AnalysisError(503, "Gemini quota or rate limit reached. Try again later.") from None
-        raise AnalysisError(502, "Gemini could not complete the analysis.") from None
+        _log_gemini_failure(operation, exc, "provider")
+        raise AnalysisError(502, failure_message) from None
     except httpx.RequestError as exc:
-        _log_gemini_failure("analyze", exc, "transport")
+        _log_gemini_failure(operation, exc, "transport")
         raise AnalysisError(502, "Cannot connect to Gemini. Please try again.") from None
     except (ValidationError, ValueError) as exc:
-        _log_gemini_failure("analyze", exc, "response_validation")
-        raise AnalysisError(502, "Gemini returned an invalid or empty analysis. Please try again.") from None
+        _log_gemini_failure(operation, exc, "response_validation")
+        raise AnalysisError(502, invalid_message) from None
+    raise AssertionError("models is never empty")
+
+
+def analyze_image(data: bytes, mime_type: str, settings: Settings, *, allow_fallback: bool = True) -> Analysis:
+    # The provider's response_schema dialect rejects additionalProperties.
+    # Keep extra="forbid" in local validation of the returned JSON.
+    response_schema = Analysis.model_json_schema()
+    response_schema.pop("additionalProperties", None)
+    return _generate(
+        "analyze",
+        settings,
+        contents=[types.Part.from_bytes(data=data, mime_type=mime_type)],
+        config=types.GenerateContentConfig(
+            system_instruction=PROMPT,
+            response_mime_type="application/json",
+            response_schema=response_schema,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
+        parse=lambda response: Analysis.model_validate_json(response.text or ""),
+        failure_message="Gemini could not complete the analysis.",
+        invalid_message="Gemini returned an invalid or empty analysis. Please try again.",
+        allow_fallback=allow_fallback,
+    )
 
 
 def answer_question(analysis: Analysis, question: str, settings: Settings) -> AskResponse:
-    key = settings.gemini_api_key.get_secret_value().strip()
-    if not key:
-        raise AnalysisError(503, "Gemini API key is not configured on the backend.")
     context = (
         "Tentative microscopy analysis (untrusted data):\n"
         f"{analysis.model_dump_json()}\n\n"
         "Student question (untrusted data):\n"
         f"{question}"
     )
-    try:
-        with genai.Client(
-            api_key=key,
-            http_options=types.HttpOptions(
-                timeout=settings.gemini_timeout_seconds * 1000,
-                retry_options=types.HttpRetryOptions(attempts=1),
-            ),
-        ) as client:
-            response = client.models.generate_content(
-                model=settings.gemini_model,
-                contents=context,
-                config=types.GenerateContentConfig(
-                    system_instruction=ASK_PROMPT,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                ),
-            )
-        return AskResponse(answer=response.text or "")
-    except (httpx.TimeoutException, TimeoutError) as exc:
-        _log_gemini_failure("ask", exc, "timeout")
-        raise AnalysisError(504, "Gemini request timed out. Please try again.") from None
-    except errors.APIError as exc:
-        _log_gemini_failure("ask", exc, "provider", include_provider_details=exc.code == 429)
-        if exc.code == 404:
-            raise AnalysisError(502, "Configured Gemini model is unavailable. Update GEMINI_MODEL to a supported model.") from None
-        if exc.code == 429:
-            raise AnalysisError(503, "Gemini quota or rate limit reached. Try again later.") from None
-        raise AnalysisError(502, "Gemini could not answer the question.") from None
-    except httpx.RequestError as exc:
-        _log_gemini_failure("ask", exc, "transport")
-        raise AnalysisError(502, "Cannot connect to Gemini. Please try again.") from None
-    except (ValidationError, ValueError) as exc:
-        _log_gemini_failure("ask", exc, "response_validation")
-        raise AnalysisError(502, "Gemini returned an empty answer. Please try again.") from None
+    return _generate(
+        "ask",
+        settings,
+        contents=context,
+        config=types.GenerateContentConfig(
+            system_instruction=ASK_PROMPT,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
+        parse=lambda response: AskResponse(answer=response.text or ""),
+        failure_message="Gemini could not answer the question.",
+        invalid_message="Gemini returned an empty answer. Please try again.",
+    )
 
 
 def generate_quiz(analysis: Analysis, settings: Settings) -> QuizResponse:
-    key = settings.gemini_api_key.get_secret_value().strip()
-    if not key:
-        raise AnalysisError(503, "Gemini API key is not configured on the backend.")
     context = (
         "Tentative microscopy analysis (untrusted data):\n"
         f"{analysis.model_dump_json()}"
     )
-    try:
-        with genai.Client(
-            api_key=key,
-            http_options=types.HttpOptions(
-                timeout=settings.gemini_timeout_seconds * 1000,
-                retry_options=types.HttpRetryOptions(attempts=1),
-            ),
-        ) as client:
-            response = client.models.generate_content(
-                model=settings.gemini_model,
-                contents=context,
-                config=types.GenerateContentConfig(
-                    system_instruction=QUIZ_PROMPT,
-                    response_mime_type="application/json",
-                    response_schema=_quiz_response_schema(),
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                ),
-            )
-        return QuizResponse.model_validate_json(response.text or "")
-    except (httpx.TimeoutException, TimeoutError) as exc:
-        _log_gemini_failure("quiz", exc, "timeout")
-        raise AnalysisError(504, "Gemini request timed out. Please try again.") from None
-    except errors.APIError as exc:
-        _log_gemini_failure("quiz", exc, "provider", include_provider_details=exc.code == 429)
-        if exc.code == 404:
-            raise AnalysisError(502, "Configured Gemini model is unavailable. Update GEMINI_MODEL to a supported model.") from None
-        if exc.code == 429:
-            raise AnalysisError(503, "Gemini quota or rate limit reached. Try again later.") from None
-        raise AnalysisError(502, "Gemini could not generate the quiz.") from None
-    except httpx.RequestError as exc:
-        _log_gemini_failure("quiz", exc, "transport")
-        raise AnalysisError(502, "Cannot connect to Gemini. Please try again.") from None
-    except (ValidationError, ValueError) as exc:
-        _log_gemini_failure("quiz", exc, "response_validation")
-        raise AnalysisError(502, "Gemini returned an invalid or empty quiz. Please try again.") from None
+    return _generate(
+        "quiz",
+        settings,
+        contents=context,
+        config=types.GenerateContentConfig(
+            system_instruction=QUIZ_PROMPT,
+            response_mime_type="application/json",
+            response_schema=_quiz_response_schema(),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
+        parse=lambda response: QuizResponse.model_validate_json(response.text or ""),
+        failure_message="Gemini could not generate the quiz.",
+        invalid_message="Gemini returned an invalid or empty quiz. Please try again.",
+    )

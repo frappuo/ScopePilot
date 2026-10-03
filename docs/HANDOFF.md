@@ -61,8 +61,11 @@ video.
     400/413/415 only.
 -   Braintrust prompt-evaluation harness with four variants and
     deterministic scorers.
--   Tests at the last run (2026-10-03): backend 87 passed, frontend 40
-    passed.
+-   Optional Gemini model fallback on quota or model-not-found
+    (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model
+    (sections 5 and 8).
+-   Tests at the last run: backend 133 passed (2026-10-04); frontend 40
+    passed (2026-10-03; frontend unchanged since).
 
 ### Verified on a physical device (user-reported)
 
@@ -313,7 +316,8 @@ services contain model/application logic.
 1.  Receive the uploaded file (`routes/analyze.py`).
 2.  `prepare_image(...)` validates and re-encodes it (see "Upload
     pipeline" below) and returns the cleaned bytes and their MIME type.
-3.  `analyze_image(...)` sends those bytes to Gemini.
+3.  `analyze_image(...)` sends those bytes to Gemini (with model
+    fallback; see "Model fallback" below).
 4.  Parse/validate the response against the `Analysis` schema.
 5.  Return JSON to the frontend.
 6.  Convert validation/provider/response failures into controlled API
@@ -328,6 +332,33 @@ app.services.gemini.analyze_image(data, mime_type, settings) -> Analysis
 
 Eval runs from commit `d2ea65f` onward send re-encoded, metadata-free
 bytes, so they are not directly comparable with earlier runs.
+
+### Model fallback (`GEMINI_FALLBACK_MODELS`)
+
+`/analyze`, `/ask`, and `/quiz` share one call helper (`_generate` in
+`backend/app/services/gemini.py`).
+
+-   Optional comma-separated list of up to 3 models, tried in order after
+    `GEMINI_MODEL` with the same API key (no key rotation). Entries are
+    trimmed; blanks, duplicates, and the primary model are dropped. More
+    than 3 entries fails startup configuration.
+-   A request moves to the next model only when Gemini returns 429 /
+    `RESOURCE_EXHAUSTED` (quota) or 404 / `NOT_FOUND` (model not found).
+    Timeouts, transport errors, other provider errors, and empty,
+    invalid, or schema-failing responses fail immediately with the usual
+    status; a bad response is never retried on another model.
+-   If every model fails: 503 if any attempt hit quota, otherwise 502
+    (model unavailable).
+-   Logs, model names only: INFO `Gemini served operation=… model=…
+    fallback_used=…` and WARNING `Gemini fallback operation=…
+    from_model=… to_model=… reason=quota|model_not_found`. The `app`
+    logger is set to INFO with one stderr handler in `app/main.py`.
+-   Evals never fall back (section 8).
+-   Only list models you have verified yourself for image input and
+    structured JSON output with your key. Google can retire models at any
+    time; recheck the list when 404s appear.
+-   Covered by mocked tests (`backend/tests/test_fallback.py`); not
+    verified against real Gemini 429/404 responses.
 
 ### Analysis response contract
 
@@ -504,6 +535,12 @@ to guide prompt decisions.
 -   Environment variable `SCOPEPILOT_EVAL_PROMPT_VARIANT` selects the
     prompt variant; the experiment name matches it.
 -   Images go through `prepare_image` before Gemini, as in production.
+-   Evals are pinned to `GEMINI_MODEL`: `analyze_case` clears
+    `GEMINI_FALLBACK_MODELS` and calls `analyze_image(...,
+    allow_fallback=False)`, so a run never switches model. The
+    experiment name is `"<variant> | <model>"` and the experiment
+    metadata records `gemini_model`, `prompt_variant`, and
+    `fallback: "disabled"`.
 -   The harness temporarily replaces the service prompt and restores it
     in `finally`; a lock protects concurrent replacement. These are
     evaluation-only changes; production prompt is not modified by
