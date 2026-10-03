@@ -32,6 +32,7 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 - Model fallback: GEMINI_FALLBACK_MODELS (comma-separated, max 3, same key) is tried only on 429/RESOURCE_EXHAUSTED or 404/NOT_FOUND; all other errors fail immediately. Evals never fall back and record the model in the experiment name/metadata. Only list models verified for image input and structured JSON output; models can be retired at any time.
 - Request limits: body size (app/middleware.py; /analyze = MAX_IMAGE_BYTES + 64 KiB, others MAX_JSON_BODY_BYTES, /health exempt); /ask and /quiz analysis caps (AnalysisInput); GEMINI_DAILY_CALL_LIMIT per UTC day per process, counts every attempt incl. fallbacks, 503 + Retry-After, resets on restart.
 - CORS is intentionally off: the native app does not need it, and CORS is not an abuse control.
+- App token: APP_TOKEN (backend) / EXPO_PUBLIC_APP_TOKEN (app) -> header X-ScopePilot-Token, checked before body parsing; empty = off; /health exempt; 401 "Unauthorized client.". It is compiled into the app bundle: a deterrent, NOT authentication. Rollout: ship the app, then set APP_TOKEN on Render, then confirm old builds get 401. Never put a real token in code, tests, docs or logs.
 
 ## Planned / not implemented (do not describe as implemented)
 Authentication and database-backed accounts are currently deferred. None of this exists in the code:
@@ -44,8 +45,7 @@ Authentication and database-backed accounts are currently deferred. None of this
 
 ## Known issues / follow-up tasks
 Details in docs/HANDOFF.md section 2.
-- Remove the temporary HealthDiagnostic panel (frontend/src/components/HealthDiagnostic.tsx).
-- No auth or per-user rate limiting on the public API (only global limits).
+- No auth or per-user rate limiting on the public API (only global limits and a shared app token).
 - Browser preview cannot call the API (CORS intentionally off).
 - /ask and /quiz trust the client-supplied analysis.
 - Reconcile eval variant names (code names differ from the handoff's recorded results).

@@ -26,7 +26,7 @@ Copy-Item backend/.env.example backend/.env
 
 Create the environment file only once; do not overwrite an existing configuration. Edit `backend/.env` and set `GEMINI_API_KEY` to your key. Environment variables override this file. Restart the backend after changes.
 
-`GEMINI_MODEL` selects the model; it must support image input and structured JSON output, and your key must have access to it. The default in `backend/app/config.py` is `gemini-2.5-flash`, which an earlier live check (see `progress.md`) found unavailable to new users. `backend/.env.example` sets `gemini-3.1-flash-lite`. Other settings: `GEMINI_FALLBACK_MODELS` (empty; up to 3 models tried only on quota or model-not-found errors, see `docs/HANDOFF.md`), `GEMINI_TIMEOUT_SECONDS` (default 60), `MAX_IMAGE_BYTES` (10 MiB), `MAX_IMAGE_PIXELS` (20,000,000), `MAX_ENCODED_IMAGE_BYTES` (14 MiB; not listed in `.env.example`), `MAX_JSON_BODY_BYTES` (64 KiB), `GEMINI_DAILY_CALL_LIMIT` (100). Numeric settings must be positive.
+`GEMINI_MODEL` selects the model; it must support image input and structured JSON output, and your key must have access to it. The default in `backend/app/config.py` is `gemini-2.5-flash`, which an earlier live check (see `progress.md`) found unavailable to new users. `backend/.env.example` sets `gemini-3.1-flash-lite`. Other settings: `GEMINI_FALLBACK_MODELS` (empty; up to 3 models tried only on quota or model-not-found errors, see `docs/HANDOFF.md`), `GEMINI_TIMEOUT_SECONDS` (default 60), `MAX_IMAGE_BYTES` (10 MiB), `MAX_IMAGE_PIXELS` (20,000,000), `MAX_ENCODED_IMAGE_BYTES` (14 MiB; not listed in `.env.example`), `MAX_JSON_BODY_BYTES` (64 KiB), `GEMINI_DAILY_CALL_LIMIT` (100), `APP_TOKEN` (empty = check off; see App token). Numeric settings must be positive.
 
 `.env` files are ignored by Git; only `.env.example` belongs in version control. Never put API keys in source files or the frontend.
 
@@ -68,6 +68,7 @@ Errors use `{"detail":"..."}` (FastAPI validation errors use a detail list):
 | Status | Cause |
 |---|---|
 | 400 | Empty, corrupt, or undecodable image |
+| 401 | Missing or wrong `X-ScopePilot-Token` while `APP_TOKEN` is set |
 | 413 | Request body over limit, upload over size limit, resolution over pixel limit, or re-encoded image too large |
 | 415 | Unsupported declared type, content not matching the declared type, or multi-frame image |
 | 422 | Missing upload, invalid request body, or `/ask`/`/quiz` analysis over the input caps |
@@ -85,6 +86,14 @@ No automatic provider retries are made.
 - These are global limits, not per-user rate limiting or authentication.
 - **CORS is intentionally not enabled.** The native app does not need it, and CORS only restricts browsers, so it is not an abuse control. As a result the browser preview cannot call the API.
 
+### App token (not authentication)
+
+- With `APP_TOKEN` set, every path except `/health` (including `/docs`) requires the header `X-ScopePilot-Token` with the same value, compared in constant time. A missing or wrong token gets 401 `{"detail": "Unauthorized client."}` before the request body is read. Empty `APP_TOKEN` turns the check off.
+- The app sends `EXPO_PUBLIC_APP_TOKEN` (from `frontend/.env`) in that header when it is set, and sends nothing otherwise.
+- `EXPO_PUBLIC_` values are compiled into the app bundle, so anyone with the app can extract the token. It deters casual scripts and drive-by web pages (a custom header forces a CORS preflight, and CORS is off), but it is **not authentication**. Real protection needs user accounts.
+- Rollout order: (1) ship the updated app built with `EXPO_PUBLIC_APP_TOKEN`; (2) set `APP_TOKEN` on Render; (3) confirm an old build now shows "This app version can't reach the service. Please update the app." (401).
+- Use dummy values in examples and tests; never commit a real token.
+
 ### Tests (from repository root)
 
 ```powershell
@@ -101,9 +110,12 @@ The Expo TypeScript app selects one gallery image, previews it, uploads it, and 
 
 The app uploads the original picked file without converting, resizing, or cropping it (`frontend/src/services/images.ts`). The type comes from the picker's MIME type, or the file extension if none is given; HEIC and unrecognized types are rejected in the app. Normalization (orientation, metadata removal, re-encoding) happens on the backend.
 
-For 400, 413, and 415 responses, the app appends the backend's short `detail` message to its own error text. Details from 5xx responses and 422 are intentionally never shown; those use fixed generic messages.
+For 400, 413, and 415 responses, the app appends the backend's short `detail` message to its own error text. Details from 5xx responses and 422 are intentionally never shown; those use fixed messages written in the app:
 
-The main screen currently includes a temporary "connection diagnostic" panel (`frontend/src/components/HealthDiagnostic.tsx`) that is meant to be removed.
+- 401: "This app version can't reach the service. Please update the app."
+- 429: "Too many requests right now. Please wait a minute and try again."
+- 503 from the daily Gemini cap: a fixed "Today's ScopePilot analysis limit has been reached…" message. The app recognizes the backend detail by its prefix but never displays it; any other 503 gets the generic message.
+- `/ask` and `/quiz` 413, and `/quiz` 422, have their own messages. For an `/ask` 422 the app reads only the structured error locations: a too-long question gets "Please enter a question of up to 500 characters."; anything else (such as the analysis caps) gets "This request could not be processed. Please analyze the image again."
 
 Install from the repository root (Node.js 22.14+ and npm):
 
