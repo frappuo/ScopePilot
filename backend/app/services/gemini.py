@@ -1,5 +1,7 @@
 from collections.abc import Callable
+from datetime import date, datetime, time, timedelta, timezone
 import logging
+import math
 import re
 from threading import Lock
 from typing import TypeVar
@@ -163,6 +165,43 @@ _FALLBACK_STATUSES = {"RESOURCE_EXHAUSTED": "quota", "NOT_FOUND": "model_not_fou
 T = TypeVar("T")
 
 
+class _DailyCallBudget:
+    """Gemini attempts per UTC day in this process.
+
+    Resets on restart, and each worker process keeps its own count. Google's
+    quota reset time may differ from midnight UTC.
+    """
+
+    def __init__(self, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
+        self.clock = clock  # Injectable for tests.
+        self._lock = Lock()
+        self._day: date | None = None
+        self._count = 0
+        self._warned = False
+
+    def take(self, limit: int, operation: str) -> int | None:
+        """Count one attempt and return None, or return seconds until the next UTC midnight."""
+        now = self.clock().astimezone(timezone.utc)
+        with self._lock:
+            if now.date() != self._day:
+                self._day, self._count, self._warned = now.date(), 0, False
+            if self._count < limit:
+                self._count += 1
+                return None
+            if not self._warned:
+                self._warned = True
+                logger.warning("Gemini daily call limit reached operation=%s limit=%s", operation, limit)
+        midnight = datetime.combine(now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        return max(1, math.ceil((midnight - now).total_seconds()))
+
+    def reset(self) -> None:
+        with self._lock:
+            self._day, self._count, self._warned = None, 0, False
+
+
+_DAILY_CALLS = _DailyCallBudget()
+
+
 def _fallback_reason(exc: errors.APIError) -> str | None:
     """Only quota exhaustion or a missing model justify trying the next model."""
     return _FALLBACK_CODES.get(exc.code) or _FALLBACK_STATUSES.get(str(exc.status or "").upper())
@@ -194,6 +233,14 @@ def _generate(
             ),
         ) as client:
             for index, model in enumerate(models):
+                # Charged per attempt, so fallback attempts count towards the daily cap.
+                retry_after = _DAILY_CALLS.take(settings.gemini_daily_call_limit, operation)
+                if retry_after is not None:
+                    raise AnalysisError(
+                        503,
+                        "Daily Gemini request limit for this server reached. Try again after 00:00 UTC.",
+                        headers={"Retry-After": str(retry_after)},
+                    )
                 try:
                     response = client.models.generate_content(model=model, contents=contents, config=config)
                 except errors.APIError as exc:

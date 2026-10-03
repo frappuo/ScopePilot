@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # Re-encoded bytes sent to Gemini; 14 MiB is ~18.7 MiB as base64,
     # under Gemini's ~20 MB inline request limit.
     max_encoded_image_bytes: int = Field(default=14 * 1024 * 1024, gt=0)
+    # Body limit for every path except /analyze (which allows max_image_bytes
+    # plus 64 KiB of multipart overhead) and /health (exempt).
+    max_json_body_bytes: int = Field(default=64 * 1024, gt=0)
+    # Gemini attempts per UTC day in this process; fallback attempts count.
+    gemini_daily_call_limit: int = Field(default=100, gt=0)
     # Comma-separated; a str because pydantic-settings would JSON-decode a list.
     # Tried in order after gemini_model, only on quota (429) or missing model (404).
     gemini_fallback_models: str = ""
