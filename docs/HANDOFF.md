@@ -64,7 +64,9 @@ video.
 -   Optional Gemini model fallback on quota or model-not-found
     (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model
     (sections 5 and 8).
--   Tests at the last run: backend 133 passed (2026-10-04); frontend 40
+-   Request limits: body-size limits, input caps on the analysis sent to
+    `/ask` and `/quiz`, and a global daily Gemini cap (section 5).
+-   Tests at the last run: backend 170 passed (2026-10-04); frontend 40
     passed (2026-10-03; frontend unchanged since).
 
 ### Verified on a physical device (user-reported)
@@ -100,7 +102,8 @@ database-backed accounts are currently deferred.
     `experiment_id`. Today both accept the full analysis supplied by
     the client (`AskRequest.analysis`, `QuizRequest.analysis` in
     `backend/app/schemas/`).
--   Per-user rate limiting. The only rate-limit handling today maps a
+-   Per-user rate limiting. Today there is only a global, per-process
+    daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`) and the mapping of a
     Gemini 429 to a 503.
 -   Later assistant features: context across experiments and learning
     tracking.
@@ -111,9 +114,10 @@ database-backed accounts are currently deferred.
 -   Remove the temporary "connection diagnostic" panel
     (`frontend/src/components/HealthDiagnostic.tsx`, shown on the main
     screen) and its `checkBackendHealth`/`checkBackendPost` helpers.
--   No CORS configuration, so the browser preview cannot call the
-    backend.
--   No authentication or rate limiting on the public API.
+-   CORS is intentionally off (section 5), so the browser preview cannot
+    call the backend.
+-   No authentication or per-user rate limiting on the public API (body
+    limits, input caps, and a global daily cap exist).
 -   `/ask` and `/quiz` trust the client-supplied analysis.
 -   Reconcile eval variant names: the code uses
     `prompt-a-naive-baseline`, `prompt-b-scopepilot-production`,
@@ -332,6 +336,46 @@ app.services.gemini.analyze_image(data, mime_type, settings) -> Analysis
 
 Eval runs from commit `d2ea65f` onward send re-encoded, metadata-free
 bytes, so they are not directly comparable with earlier runs.
+
+### Request limits
+
+These are global limits, not per-user rate limiting or authentication.
+
+-   **Body size** (`BodySizeLimitMiddleware`, `backend/app/middleware.py`,
+    a pure ASGI middleware): `/analyze` allows `MAX_IMAGE_BYTES` + 64 KiB
+    of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES`
+    (default 64 KiB); `/health` is exempt. A `Content-Length` over the
+    limit gets a 413 JSON response before anything is read. A body
+    without a usable length (chunked) is counted as it streams and gets
+    413 once it passes the limit. Either way FastAPI never parses the
+    body, so `prepare_image`, the decode lock, and Gemini are not
+    reached. Each rejection is logged with path, limit, and reason.
+-   **Input caps** (`AnalysisInput` in `backend/app/schemas/analysis.py`,
+    used by `AskRequest` and `QuizRequest`): `probable_specimen` ≤ 300
+    characters, `explanation` ≤ 6000, each list ≤ 40 items of ≤ 1000
+    characters; over a cap gives 422 before Gemini. The `/analyze`
+    response model is still the uncapped `Analysis`. The caps together
+    allow more text than the 64 KiB body limit; they stop single
+    oversized fields.
+-   **Daily Gemini cap** (`_DailyCallBudget` in
+    `backend/app/services/gemini.py`): at most `GEMINI_DAILY_CALL_LIMIT`
+    (default 100) Gemini attempts per UTC day, counted inside `_generate`
+    just before each `generate_content` call, so fallback attempts count.
+    Over the cap: 503 "Daily Gemini request limit for this server
+    reached…" with `Retry-After` set to the seconds until 00:00 UTC; a
+    WARNING is logged once per day. The count lives in process memory: it
+    resets on restart, and each worker process counts separately.
+    Google's own quota reset time may differ from UTC midnight. Requests
+    rejected before Gemini do not consume it.
+-   Covered by mocked tests (`backend/tests/test_limits.py`); not
+    verified on Render.
+
+### CORS
+
+CORS is intentionally not enabled. The native app does not send browser
+CORS preflights, and CORS only restricts what browsers allow pages to
+read; any other client can still call the API. It is therefore not an
+abuse control. The cost is that the web preview cannot call the backend.
 
 ### Model fallback (`GEMINI_FALLBACK_MODELS`)
 
