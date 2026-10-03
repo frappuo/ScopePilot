@@ -7,8 +7,10 @@ repository for exact current code behavior.
 
 -   **Official title:** ScopePilot: An AI-Assisted Microscopy
     Observation System Using Vision Language Models
+-   **Course:** BCSE497J Project-I
 -   **Repository:** https://github.com/frappuo/ScopePilot
--   **Public backend:** https://scopepilot.onrender.com
+-   **Public backend:** https://scopepilot.onrender.com (per handoff;
+    the repository contains no Render configuration)
 -   **Domain:** Educational microscopy only; not a diagnostic system.
 
 ## 1. Product summary
@@ -29,26 +31,50 @@ responsible for verifying the output through direct observation and
 trusted materials. ScopePilot does not diagnose disease or replace
 expert judgment.
 
+**Problem addressed:** students using microscopes often have difficulty
+identifying specimens, recognizing visible biological structures,
+understanding what they observe, and getting immediate guidance during
+laboratory work. A conventional microscope gives visual access to a
+specimen but no interactive educational assistance. ScopePilot augments
+the existing optical microscope rather than replacing it.
+
+**Longer-term ideas (not planned for the current prototype, not
+implemented):** image history, comparison between microscope images, a
+custom microscopy VLM, Soup-based fine-tuning, classifier/reliability
+models, advanced uncertainty calibration, and real-time microscope
+video.
+
 ## 2. Current status
 
-### Implemented / working as last reported
+### Implemented
 
--   React Native/Expo mobile application.
--   Image selection and upload.
+-   React Native/Expo mobile application (gallery selection only; no
+    camera capture).
+-   Image upload of the original file; backend validation and
+    re-encoding (see section 5).
 -   FastAPI backend and Gemini VLM integration.
 -   Structured microscopy analysis response.
 -   Follow-up Q&A (`/ask`).
--   Quiz generation (`/quiz`); tested flow generated three questions.
--   Image validation and backend error handling.
--   Public Render deployment at `https://scopepilot.onrender.com`.
--   Physical iPhone testing and successful app/backend connectivity.
+-   Quiz generation (`/quiz`): exactly three questions, four options
+    each.
+-   Backend error handling; the app shows the backend's `detail` for
+    400/413/415 only.
 -   Braintrust prompt-evaluation harness with four variants and
     deterministic scorers.
--   Backend test suite: 65 tests passed at the last recorded run.
+-   Tests at the last run (2026-10-03): backend 87 passed, frontend 40
+    passed.
 
-### Planned, incomplete, or not verified as complete
+### Verified on a physical device (user-reported)
+
+-   2026-10-03: analysis, Q&A, quiz, Live Photos, and PNG uploads
+    verified on a physical iPhone against the deployed Render backend.
+-   Render deployment at `https://scopepilot.onrender.com`: per
+    handoff and user report; not verifiable from the repository.
+
+### Incomplete or not verified
 
 -   Production RAG integration over a trusted biology knowledge base.
+-   Camera capture in the app.
 -   Larger, expert-reviewed microscopy benchmark.
 -   Semantic specimen matching.
 -   Structure precision/F1 and validated hallucination scoring.
@@ -59,6 +85,49 @@ expert judgment.
 -   Clinical or diagnostic functionality (out of scope).
 
 Do not describe planned features as implemented.
+
+### Planned / not implemented
+
+None of the following exists in the code. Authentication and
+database-backed accounts are currently deferred.
+
+-   User accounts and login.
+-   Saved experiment logs: list, open, rename, delete.
+-   Server-side storage of analyses, so that `/ask` and `/quiz` take an
+    `experiment_id`. Today both accept the full analysis supplied by
+    the client (`AskRequest.analysis`, `QuizRequest.analysis` in
+    `backend/app/schemas/`).
+-   Per-user rate limiting. The only rate-limit handling today maps a
+    Gemini 429 to a 503.
+-   Later assistant features: context across experiments and learning
+    tracking.
+-   RAG over trusted biology material.
+
+### Known issues / follow-up tasks
+
+-   Remove the temporary "connection diagnostic" panel
+    (`frontend/src/components/HealthDiagnostic.tsx`, shown on the main
+    screen) and its `checkBackendHealth`/`checkBackendPost` helpers.
+-   No CORS configuration, so the browser preview cannot call the
+    backend.
+-   No authentication or rate limiting on the public API.
+-   `/ask` and `/quiz` trust the client-supplied analysis.
+-   Reconcile eval variant names: the code uses
+    `prompt-a-naive-baseline`, `prompt-b-scopepilot-production`,
+    `prompt-c-overconstrained`, `prompt-d-synthesized`, which differ
+    from the names in section 8. `prompt-a-naive-baseline` actually
+    sends the unchanged production prompt, and
+    `prompt-b-scopepilot-production` is the production prompt plus
+    extra instructions.
+-   Gemini's handling of 16-bit grayscale PNG is untested.
+-   The code default `GEMINI_MODEL` (`gemini-2.5-flash`) differs from
+    `backend/.env.example` (`gemini-3.1-flash-lite`) and was recorded
+    as unavailable to new users (`progress.md`).
+-   `backend/.env.example` does not list `MAX_ENCODED_IMAGE_BYTES`.
+-   A "server busy" 503 shows the app's generic 503 message, not the
+    backend detail.
+-   Real-device behavior of the decode lock and memory use on Render
+    have not been measured.
 
 ## 3. Architecture
 
@@ -113,7 +182,8 @@ responsibilities.
 
 ### Component responsibilities
 
-**Frontend:** UI, image selection/capture workflow, API requests,
+**Frontend:** UI, gallery image selection (camera capture is not
+implemented), API requests,
 loading/error/success states, and display of analysis/Q&A/quiz. It does
 not call Gemini directly.
 
@@ -168,10 +238,8 @@ model or product database.
   Render                              Public HTTPS hosting for the
                                       backend.
 
-  ChromaDB/embeddings                 RAG direction; do not claim the
-                                      full production retrieval pipeline
-                                      is complete without checking the
-                                      current code.
+  ChromaDB/embeddings                 Planned RAG direction; not in the
+                                      code or requirements.
   -----------------------------------------------------------------------
 
 ### Why a VLM rather than a conventional classifier?
@@ -199,22 +267,24 @@ the client less dependent on a particular model provider.
 
 ## 5. Backend
 
-Known structure:
+Structure:
 
 ``` text
 backend/
   app/
-    routes/
-    schemas/
-    services/
+    config.py            Settings (env / backend/.env)
+    main.py              app, routers, AnalysisError handler
+    routes/              analyze.py, ask.py, quiz.py, health.py
+    schemas/             analysis.py, ask.py, quiz.py, health.py
+    services/            gemini.py, images.py, errors.py
   evals/
     microscopy_eval.py
     images/
+  tests/
 ```
 
 Routes handle HTTP communication, schemas define data contracts, and
-services contain model/application logic. Verify exact files before
-making code-level claims.
+services contain model/application logic.
 
 ### Endpoints
 
@@ -240,27 +310,24 @@ making code-level claims.
 
 ### `/analyze` request flow
 
-1.  Receive the uploaded file.
-2.  Validate supported media type and other file constraints before
-    model invocation where applicable.
-3.  Read image bytes and pass the MIME type.
-4.  Call the Gemini service.
-5.  Parse/validate the response against the `Analysis` schema.
-6.  Return JSON to the frontend.
-7.  Convert validation/provider/response failures into controlled API
-    errors.
+1.  Receive the uploaded file (`routes/analyze.py`).
+2.  `prepare_image(...)` validates and re-encodes it (see "Upload
+    pipeline" below) and returns the cleaned bytes and their MIME type.
+3.  `analyze_image(...)` sends those bytes to Gemini.
+4.  Parse/validate the response against the `Analysis` schema.
+5.  Return JSON to the frontend.
+6.  Convert validation/provider/response failures into controlled API
+    errors (`AnalysisError` → `{"detail": ...}`).
 
-The evaluation harness reuses this service function:
+The evaluation harness reuses both service functions:
 
 ``` python
-app.services.gemini.analyze_image(
-    data: bytes,
-    mime_type: str,
-    settings: Settings,
-) -> Analysis
+app.services.images.prepare_image(data, content_type, settings) -> tuple[bytes, str]
+app.services.gemini.analyze_image(data, mime_type, settings) -> Analysis
 ```
 
-Confirm current implementation in the repo before modifying it.
+Eval runs from commit `d2ea65f` onward send re-encoded, metadata-free
+bytes, so they are not directly comparable with earlier runs.
 
 ### Analysis response contract
 
@@ -290,32 +357,71 @@ intended scope is educational microscopy/biology. `/quiz` uses the
 analysis context to generate questions; the tested flow generated three.
 Both depend on model output and should not be treated as infallible.
 
-### Recent upload issue
+### Upload pipeline (`prepare_image` in `backend/app/services/images.py`)
 
-A mobile request logged:
+**Resolved iPhone 415 (fixed 2026-10-03, commit `d2ea65f`):** iPhone
+camera JPEGs (e.g. 2268×4032, ~1.2 MB) are detected by Pillow as format
+`MPO` with two frames. The old validator mapped only `JPEG`/`PNG`/`WEBP`,
+so the declared-type check returned 415 "Image content does not match
+its declared type." (its single-frame check would also have rejected
+them). The cause was not HEIC; the app rejects HEIC before upload.
 
-``` text
-endpoint: https://scopepilot.onrender.com/analyze
-fileSize: 3258644
-hasFileName: true
-mimeType: image/jpeg
-uriScheme: file
-response status: 415
-```
+Current steps, in order:
 
-415 means the backend rejected the media type at the API boundary,
-likely before Gemini. The precise cause is unconfirmed. Possible causes
-include the validator's accepted-type rules, a mismatch between MIME
-metadata and actual bytes, or an iPhone HEIC/HEIF image represented as
-JPEG. Inspect Render logs and `validate_image(...)` before changing
-code; do not assume the cause.
+1.  Cheap checks: empty → 400; over `max_image_bytes` (10 MiB) → 413;
+    declared type not `image/jpeg`, `image/png`, or `image/webp` → 415.
+2.  Header-only checks (no full decode yet), with Pillow's
+    decompression-bomb protection active:
+    -   detected format must match the declared type; `MPO` counts as
+        JPEG → otherwise 415;
+    -   width × height within `max_image_pixels` (20,000,000) → otherwise
+        413 with a message stating the limit;
+    -   exactly one frame, except MPO → otherwise 415 (animated GIF, APNG,
+        and animated WebP are rejected).
+3.  Decode under a one-at-a-time lock. A request waits up to 5 seconds
+    for the lock, then gets 503 "Server is busy…". The lock covers only
+    decode and re-encode, never the Gemini call, and is released on
+    every error path.
+4.  Decode the first frame only (for MPO, the primary image) and apply
+    EXIF orientation.
+5.  Re-encode without EXIF/GPS, XMP, comments, or PNG text chunks. The
+    ICC profile is kept only when the image mode is unchanged.
+    -   JPEG/MPO → JPEG, quality 95; modes other than RGB/L are
+        converted to RGB. This is a deliberate second lossy encode.
+    -   PNG → PNG, lossless; mode kept (including P with transparency,
+        LA, RGBA, and 16-bit grayscale `I;16`).
+    -   WebP → WebP, lossy quality 95; modes other than RGB/RGBA are
+        converted.
+    -   No resizing.
+6.  Re-encoded output over `max_encoded_image_bytes` (14 MiB, about
+    18.7 MiB as base64, below Gemini's ~20 MB inline request limit) →
+    413.
+7.  Decode/encode failure → 400.
+
+Gemini receives the re-encoded bytes with the MIME type of the output
+format. Each rejection is logged at WARNING with the rule, status,
+declared type (only if one of the three accepted types, otherwise
+`other`/`none`), and detected format. No image content is logged.
+
+Limitations:
+
+-   16-bit-per-channel RGB PNGs are reduced to 8 bits per channel by
+    Pillow when decoded; only 16-bit grayscale round-trips.
+-   Gemini's handling of 16-bit PNG is untested.
+-   Peak memory for one 20 MP image was measured on Windows at roughly
+    +170–340 MiB (WebP highest); it has not been measured on Render.
 
 ## 6. Frontend and deployment
 
-The app has been tested on a physical iPhone. The image picker provides
-a local file URI, which is different from an HTTP URL. Image uploads use
-multipart form data. The app displays the structured response and should
-represent loading, success, and error states.
+The app has been tested on a physical iPhone (latest user-reported check:
+2026-10-03, against the Render backend). The image picker provides a
+local file URI, which is different from an HTTP URL. The app uploads the
+original file as multipart form data without converting or resizing it
+(`frontend/src/services/images.ts`); HEIC and unrecognized types are
+rejected in the app. The app shows loading, success, and error states.
+For 400/413/415 it appends the backend's `detail` to its own message;
+5xx and 422 details are intentionally never shown
+(`frontend/src/services/api.ts`).
 
 The working public backend URL is:
 
@@ -338,11 +444,10 @@ deployed HTTPS URL avoids that issue.
 
 ## 7. Prompting, guardrails, and security
 
-The Gemini service contains the production analysis prompt. It specifies
-the task, educational framing, expected output, and cautious
-interpretation. Unless the code confirms use of Gemini's
-`system_instruction` parameter, call this an **application
-prompt/instruction**, not necessarily a provider-level system prompt.
+The Gemini service (`backend/app/services/gemini.py`) contains the
+production analysis, Q&A, and quiz prompts. Each is passed as Gemini's
+`system_instruction`. They specify the task, educational framing,
+expected output, and cautious interpretation.
 
 Prompt instructions aim to: - keep analysis educational and
 microscopy-focused; - identify a *probable* specimen; - separate direct
@@ -392,10 +497,13 @@ to guide prompt decisions.
 -   Braintrust project: `ScopePilot`
 -   Harness: `backend/evals/microscopy_eval.py`
 -   Images: `backend/evals/images/`
--   Model in recorded runs: `gemini-3.1-flash-lite` (confirm current
-    setting before rerunning).
--   Environment variable selects prompt variant; experiment name matches
-    it.
+-   Model: the harness has no model setting of its own; it uses the
+    configured `GEMINI_MODEL` (`get_settings()`). Model in the recorded
+    runs: `gemini-3.1-flash-lite`, per handoff; not verifiable from the
+    repository.
+-   Environment variable `SCOPEPILOT_EVAL_PROMPT_VARIANT` selects the
+    prompt variant; the experiment name matches it.
+-   Images go through `prepare_image` before Gemini, as in production.
 -   The harness temporarily replaces the service prompt and restores it
     in `finally`; a lock protects concurrent replacement. These are
     evaluation-only changes; production prompt is not modified by
@@ -404,18 +512,25 @@ to guide prompt decisions.
 From `backend/`:
 
 ``` powershell
-$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-baseline"
+$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-naive-baseline"
 .\.venv\Scripts\braintrust.exe eval evals/microscopy_eval.py
 ```
 
-Valid values: - `prompt-a-baseline` -
-`prompt-b-visibility-constrained` -
-`prompt-c-educational-conservative` - `prompt-d-synthesized`
+Valid values in the current code (`PROMPT_VARIANTS`):
+`prompt-a-naive-baseline`, `prompt-b-scopepilot-production`,
+`prompt-c-overconstrained`, `prompt-d-synthesized`.
+
+These differ from the names used for the recorded results below
+(`prompt-a-baseline`, `prompt-b-visibility-constrained`,
+`prompt-c-educational-conservative`); the mapping between the two sets
+is unreconciled. In the code, `prompt-a-naive-baseline` sends the
+unchanged production prompt, and the other three append extra
+instructions to it.
 
 From repo root:
 
 ``` powershell
-$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-baseline"
+$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-naive-baseline"
 .\backend\.venv\Scripts\braintrust.exe eval backend/evals/microscopy_eval.py
 ```
 
@@ -456,7 +571,8 @@ An `LLMClassifier` semantic scorer was attempted to handle cases such as
 `onion epidermis` versus `Allium cepa (onion) epidermal cell`. Autoevals
 tried to use `gpt-4o` through Braintrust Gateway, but that provider was
 not configured for the `ScopePilot` organization. The semantic scorer is
-disabled; do not report semantic results.
+still defined in the harness (`specimen_accuracy_semantic`) but is not in
+the `scores` list; do not report semantic results.
 
 ### Prompt variants
 
@@ -481,6 +597,10 @@ conservative variants, aiming to retain useful caution and educational
 framing without over-restricting structure reporting.
 
 ### Recorded results
+
+As recorded in this handoff (variant names as used at the time; see the
+naming note above). These runs predate the upload re-encoding change and
+are not verifiable from the repository.
 
   -------------------------------------------------------------------------------------------
   Variant                      Limitation       Schema      Lexical    Structure     Duration
@@ -597,10 +717,17 @@ uvicorn app.main:app --reload
 Local API: `http://127.0.0.1:8000`\
 Swagger: `http://127.0.0.1:8000/docs`
 
+Run tests from the repository root:
+
+``` powershell
+Push-Location backend; .\.venv\Scripts\python.exe -m pytest -q --basetemp="$env:USERPROFILE\pytest-tmp"; Pop-Location
+Push-Location frontend; npm.cmd run typecheck; npm.cmd test; Pop-Location
+```
+
 Run evaluation from `backend/`:
 
 ``` powershell
-$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-baseline"
+$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-naive-baseline"
 .\.venv\Scripts\braintrust.exe eval evals/microscopy_eval.py
 ```
 
@@ -610,33 +737,35 @@ includes `braintrust[cli]==0.37.0` and `autoevals==0.1.0`.
 
 ## 12. Recommended product next steps
 
-1.  Diagnose the mobile upload `415` using deployed logs and the actual
-    validator. Verify real file format; do not merely relabel HEIC as
-    JPEG.
-2.  Improve user-facing upload validation errors.
-3.  Add or verify explicit handling for valid but non-microscopy images.
-4.  Harden and adversarially test `/ask` scope and direct/indirect
+The mobile-upload 415 and user-facing upload errors were resolved on
+2026-10-03 (see section 5). Remaining:
+
+1.  Work through "Known issues / follow-up tasks" in section 2.
+2.  Add or verify explicit handling for valid but non-microscopy images.
+3.  Harden and adversarially test `/ask` scope and direct/indirect
     prompt injection.
-5.  Review individual A/B/C/D outputs per image, not just aggregate
-    scores.
-6.  Expand and expert-validate the dataset.
-7.  Improve semantic matching and hallucination evaluation only where
+4.  Reconcile eval variant names, then review individual A/B/C/D
+    outputs per image, not just aggregate scores. Re-run the eval to set
+    a baseline with re-encoded images.
+5.  Expand and expert-validate the dataset.
+6.  Improve semantic matching and hallucination evaluation only where
     ground truth supports it.
-8.  Implement and separately evaluate RAG.
-9.  Evaluate educational usability with students/instructors.
-10. Keep experimental prompt changes isolated from the production
+7.  Implement and separately evaluate RAG.
+8.  Evaluate educational usability with students/instructors.
+9.  Keep experimental prompt changes isolated from the production
     prompt.
 
-## 13. Instructions for Claude
+## 13. Instructions for Claude Code
 
--   Treat the repository as the source of truth for exact implementation
-    details; this handoff may lag behind later changes.
--   Inspect relevant files and current Git state before proposing code
+-   Treat the repository as the source of truth; this handoff may lag
+    behind later changes. `CLAUDE.md` holds the working rules.
+-   Inspect relevant files and current Git state before proposing
     changes.
--   The user prefers precise prompts to feed Codex rather than manual
-    editing instructions. For risky changes, provide a plan-only prompt
-    first; after review, provide an implementation prompt.
--   Keep changes focused and explain architectural trade-offs.
+-   For risky changes, plan first and wait for approval before editing.
+-   Keep changes precise and focused; do not touch unrelated files.
+    Explain architectural trade-offs.
+-   Run the relevant tests/build after edits and report results
+    honestly.
 -   Clearly distinguish implemented, partially implemented, and planned
     features.
 -   Use the official name **ScopePilot** (not the old name MicroLens).
