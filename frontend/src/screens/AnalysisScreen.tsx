@@ -5,7 +5,6 @@ import { analyzeImage, askQuestion, generateQuiz } from '../services/api';
 import { selectImage } from '../services/images';
 import type { Analysis, SelectedImage } from '../types/analysis';
 import type { Quiz } from '../types/quiz';
-import HealthDiagnostic from '../components/HealthDiagnostic';
 
 function Section({ title, content }: { title: string; content: string | string[] }) {
   return <View style={styles.section}>
@@ -145,7 +144,6 @@ export default function AnalysisScreen() {
       <Text accessibilityRole="header" style={styles.title}>ScopePilot</Text>
       <Text style={styles.intro}>Take a closer look.</Text>
       <Text style={styles.body}>Choose a microscopy photo to explore its visible structures.</Text>
-      <HealthDiagnostic />
       <View style={styles.preview}>
         {image ? <Image source={{ uri: image.uri }} style={styles.image} resizeMode="contain" accessibilityLabel="Selected microscopy image" />
           : <View style={styles.empty}><Text style={styles.sectionTitle}>Your specimen, up close</Text><Text style={styles.hint}>Select an image from your gallery to begin.</Text></View>}

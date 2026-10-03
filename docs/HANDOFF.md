@@ -66,8 +66,10 @@ video.
     (sections 5 and 8).
 -   Request limits: body-size limits, input caps on the analysis sent to
     `/ask` and `/quiz`, and a global daily Gemini cap (section 5).
--   Tests at the last run: backend 170 passed (2026-10-04); frontend 40
-    passed (2026-10-03; frontend unchanged since).
+-   Optional shared app token (`APP_TOKEN` / `X-ScopePilot-Token`); a
+    deterrent, not authentication (section 5).
+-   Tests at the last run (2026-10-04): backend 190 passed; frontend 41
+    passed.
 
 ### Verified on a physical device (user-reported)
 
@@ -111,13 +113,11 @@ database-backed accounts are currently deferred.
 
 ### Known issues / follow-up tasks
 
--   Remove the temporary "connection diagnostic" panel
-    (`frontend/src/components/HealthDiagnostic.tsx`, shown on the main
-    screen) and its `checkBackendHealth`/`checkBackendPost` helpers.
 -   CORS is intentionally off (section 5), so the browser preview cannot
     call the backend.
 -   No authentication or per-user rate limiting on the public API (body
-    limits, input caps, and a global daily cap exist).
+    limits, input caps, a global daily cap, and an optional shared app
+    token exist).
 -   `/ask` and `/quiz` trust the client-supplied analysis.
 -   Reconcile eval variant names: the code uses
     `prompt-a-naive-baseline`, `prompt-b-scopepilot-production`,
@@ -370,6 +370,28 @@ These are global limits, not per-user rate limiting or authentication.
 -   Covered by mocked tests (`backend/tests/test_limits.py`); not
     verified on Render.
 
+### App token (`APP_TOKEN`)
+
+-   `AppTokenMiddleware` (`backend/app/middleware.py`) runs before
+    `BodySizeLimitMiddleware` (it is added last in `app/main.py`, so it is
+    outermost). With `APP_TOKEN` set, every path except `/health`
+    (including `/docs`) needs the header `X-ScopePilot-Token`, compared
+    with `hmac.compare_digest`. Missing or wrong → 401
+    `{"detail": "Unauthorized client."}` before the body is read. Empty
+    `APP_TOKEN` (the default) turns the check off.
+-   Rejections log path and reason (`missing` or `mismatch`) only; the
+    token is a `SecretStr` and never appears in logs, errors, or reprs.
+-   The app sends `EXPO_PUBLIC_APP_TOKEN` when set. `EXPO_PUBLIC_` values
+    are compiled into the app bundle, so the token can be extracted. It
+    deters casual scripts and drive-by web pages (a custom header forces
+    a CORS preflight, and CORS is off); it is **not authentication**.
+    Real protection needs user accounts.
+-   Rollout order: ship the updated app first; then set `APP_TOKEN` on
+    Render; then confirm old builds get the 401 "update the app" message.
+-   Covered by mocked tests (`backend/tests/test_app_token.py`,
+    `frontend/tests/api.test.cjs`); not verified on Render or in a device
+    build.
+
 ### CORS
 
 CORS is intentionally not enabled. The native app does not send browser
@@ -496,7 +518,15 @@ original file as multipart form data without converting or resizing it
 rejected in the app. The app shows loading, success, and error states.
 For 400/413/415 it appends the backend's `detail` to its own message;
 5xx and 422 details are intentionally never shown
-(`frontend/src/services/api.ts`).
+(`frontend/src/services/api.ts`). Fixed app messages cover 401 ("update
+the app"), 429, the daily-cap 503 (recognized by the prefix "Daily Gemini
+request limit", never displayed), and `/ask`/`/quiz` 413 and `/quiz` 422.
+For an `/ask` 422 the app inspects only FastAPI's structured error
+locations: a too-long question gets a question message, anything else a
+neutral "analyze the image again" message. When `EXPO_PUBLIC_APP_TOKEN` is
+set, the app sends `X-ScopePilot-Token` on all three calls, including the
+native `File.upload` path. The temporary connection-diagnostic panel has
+been removed.
 
 The working public backend URL is:
 
