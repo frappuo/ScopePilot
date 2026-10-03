@@ -205,7 +205,8 @@ def _analyze_with_prompt(
         production_prompt = gemini_service.PROMPT
         gemini_service.PROMPT = _prompt_for_variant(prompt_variant)
         try:
-            return gemini_service.analyze_image(data, mime_type, settings)
+            # Evals never fall back, so a run measures exactly one model.
+            return gemini_service.analyze_image(data, mime_type, settings, allow_fallback=False)
         finally:
             gemini_service.PROMPT = production_prompt
 
@@ -219,7 +220,7 @@ def analyze_case(
     elif prompt_variant not in PROMPT_VARIANTS:
         supported = ", ".join(PROMPT_VARIANTS)
         raise ValueError(f"{PROMPT_VARIANT_ENV} must be one of: {supported}")
-    settings = get_settings()
+    settings = get_settings().model_copy(update={"gemini_fallback_models": ""})
     image_path = _safe_image_path(input.get("image_path"))
     data = image_path.read_bytes()
     mime_type, _ = mimetypes.guess_type(image_path.name)
@@ -318,10 +319,12 @@ def specimen_accuracy_semantic(
 
 def run_eval() -> Any:
     prompt_variant = _selected_prompt_variant()
-    print(f"[ScopePilot eval] prompt_variant={prompt_variant} cases={len(CASES)}")
+    model = get_settings().gemini_model
+    print(f"[ScopePilot eval] prompt_variant={prompt_variant} model={model} cases={len(CASES)}")
     return Eval(
         "ScopePilot",
-        experiment_name=prompt_variant,
+        experiment_name=f"{prompt_variant} | {model}",
+        metadata={"gemini_model": model, "prompt_variant": prompt_variant, "fallback": "disabled"},
         data=lambda: CASES,
         task=lambda input: analyze_case(input, prompt_variant=prompt_variant),
         scores=[

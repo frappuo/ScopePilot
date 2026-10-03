@@ -29,6 +29,7 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 - iPhone camera JPEGs are detected by Pillow as format MPO (2 frames). Fixed by `prepare_image` (commit d2ea65f): MPO is accepted as JPEG, first frame only, re-encoded without metadata. User-verified on a physical iPhone against Render on 2026-10-03.
 - Frontend reads the API base URL from EXPO_PUBLIC_API_URL (frontend/.env).
 - Model: code default `gemini-2.5-flash` (config.py); backend/.env.example sets `gemini-3.1-flash-lite`; the model used on Render is not verifiable from the repo.
+- Model fallback: GEMINI_FALLBACK_MODELS (comma-separated, max 3, same key) is tried only on 429/RESOURCE_EXHAUSTED or 404/NOT_FOUND; all other errors fail immediately. Evals never fall back and record the model in the experiment name/metadata. Only list models verified for image input and structured JSON output; models can be retired at any time.
 
 ## Planned / not implemented (do not describe as implemented)
 Authentication and database-backed accounts are currently deferred. None of this exists in the code:
