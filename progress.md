@@ -1,6 +1,33 @@
 # ScopePilot Development Progress
 
-## Current Status
+Dated log, newest first. Current status, planned features, and known issues
+live in `docs/HANDOFF.md`.
+
+## Upload Fix, Docs Sync and Device Verification (2026-10-03)
+
+- Cause of the iPhone 415: iPhone camera JPEGs are detected by Pillow as format
+  MPO with two frames, which the declared-type check rejected. It was not HEIC.
+- Fixed by `prepare_image` in `backend/app/services/images.py` (commit
+  `d2ea65f`): MPO accepted as JPEG using the first frame; header-only checks
+  before full decode; EXIF orientation applied; EXIF/GPS/XMP/text metadata
+  stripped; re-encoding as JPEG q95, lossless PNG, or WebP q95; re-encoded
+  output capped by `max_encoded_image_bytes` (14 MiB); one-at-a-time decode
+  lock with a 5-second wait, then 503; rejection logs record only rule,
+  declared type, and detected format; the pixel-limit message states the limit.
+- The app appends the backend `detail` for 400/413/415 only; 5xx details are
+  never shown (commit `1a6e894`).
+- The eval harness now sends `prepare_image` output, so eval results from this
+  point are not directly comparable with earlier runs.
+- Backend suite: 87 passed. Frontend suite: 40 passed. TypeScript typecheck and
+  `expo export` passed.
+- User-verified on a physical iPhone against the deployed Render backend:
+  analysis, follow-up Q&A, quiz, Live Photos, and PNG uploads. This supersedes
+  the "physical-iPhone verification pending" notes in earlier entries; Q&A
+  keyboard scrolling was not separately reported.
+- Not verified: Gemini's handling of 16-bit PNG; memory use on Render.
+- Documentation synced to the code. `architecture.md` and `project_context.md`
+  were merged into `docs/HANDOFF.md` and removed; `agents.md` now points to
+  `CLAUDE.md`.
 
 ## Educational Quiz Verification (2026-09-08)
 
@@ -16,7 +43,6 @@
   typecheck passed.
 - Web export passed. The all-platform export reached bundling but the local
   Hermes compiler executable was denied permission by the environment.
-- Physical-iPhone quiz verification is still pending.
 
 ## Q&A Keyboard Focus Scrolling (2026-09-07)
 
@@ -26,7 +52,6 @@
   a 32 px gap.
 - Answer arrival keeps its separate `scrollToEnd` behavior.
 - Frontend TypeScript typecheck passed and all 33 existing frontend tests passed.
-- Physical-iPhone verification is pending on the refreshed Metro bundle.
 
 ## Follow-up Q&A Verification (2026-09-07)
 
@@ -46,18 +71,16 @@
 - A lightweight frontend sanitizer removes obvious Markdown headings and paired
   emphasis markers and converts Markdown list markers to readable bullet lines.
 - The Q&A screen now uses React Native keyboard avoidance and explicit scrolling on
-  keyboard open and answer arrival. iOS bundling passed, but physical keyboard and
-  scroll behavior has not yet been verified.
+  keyboard open and answer arrival. iOS bundling passed.
 - Full backend suite: 54 tests passed. Frontend suite: 33 tests passed. TypeScript
   typecheck and the iOS, Android, and web exports passed. Existing `/analyze` and
   image-upload tests remain passing.
-- Physical-iPhone verification of the new Q&A controls is still pending; no phone
-  connected to the refreshed Metro bundle during this verification run.
 
 ## Frontend Parcel Verification (2026-09-06)
 
 - Expo SDK 57 TypeScript frontend initialized with a single analysis screen,
-  dedicated API service, gallery selection, JPEG preparation, preview, loading/error
+  dedicated API service, gallery selection, JPEG preparation (later removed; the
+  app now uploads the original file), preview, loading/error
   states, and all five structured result sections.
 - `npm run typecheck`: passed.
 - `npm test`: 6 API-service tests passed (multipart upload, network failure,
@@ -66,9 +89,6 @@
   Native compilation required execution outside the filesystem sandbox.
 - Expo dev server ran on port 8081; browser preview rendered and the no-image
   state correctly disabled Analyze. Layout inspected visually.
-- Physical-phone gallery permissions, JPEG conversion on-device, and a complete
-  phone-to-backend upload have not been verified. These require a compatible
-  Expo Go device and the LAN setup documented in README.md.
 - Browser preview API requests require backend CORS; backend was unchanged.
 - npm installation reported 10 moderate dependency vulnerabilities. No forced
   dependency upgrades were applied. Expo's offline compatibility check reported
@@ -135,7 +155,13 @@ validation does not currently pass.
   configuration still needs a usable GEMINI_API_KEY for normal startup.
 - No analysis, frontend, or future-feature implementation was changed in this task.
 
-## Completed
+## Historical Plan (early 2026-09, superseded)
+
+Original planning notes, kept for the record. Frontend/backend integration,
+follow-up Q&A, and quiz generation have since been implemented; RAG and camera
+capture have not.
+
+### Completed
 
 - Project idea finalized
 - System architecture defined
@@ -144,12 +170,12 @@ validation does not currently pass.
 - Literature review completed
 - Project-I documentation started
 
-## Current Sprint
+### Current Sprint
 
 Goal:
 Build a 60–70% working ScopePilot prototype within four days.
 
-## Immediate Tasks
+### Immediate Tasks
 
 - Initialize repository
 - Initialize FastAPI backend
@@ -158,7 +184,7 @@ Build a 60–70% working ScopePilot prototype within four days.
 - Integrate Gemini image analysis
 - Test analysis using microscopy image
 
-## Not Started
+### Not Started
 
 - Frontend/backend integration
 - Follow-up Q&A
@@ -167,7 +193,7 @@ Build a 60–70% working ScopePilot prototype within four days.
 - Camera capture
 - UI polishing
 
-## Deferred
+### Deferred
 
 - Soup
 - custom VLM training

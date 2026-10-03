@@ -1,7 +1,7 @@
 ﻿# ScopePilot
 
 AI-assisted microscopy education app (name is ScopePilot, never "MicroLens"). Educational only, NOT diagnostic.
-Stack: Expo/React Native/TypeScript frontend, FastAPI + Pydantic backend, Gemini VLM, Braintrust evals, Render deploy.
+Stack: Expo/React Native/TypeScript frontend, FastAPI + Pydantic backend, Gemini VLM, Braintrust evals, Render deploy (per handoff; no Render config in the repo).
 Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of truth.
 
 ## Commands (PowerShell, repo root)
@@ -23,10 +23,31 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 - Inspect first, then explain the plan and the files to change. For risky changes, plan only and wait for approval.
 - Keep changes focused; do not touch unrelated files.
 - Run relevant tests/build after edits, report commands and results, and never claim something works unless it was run.
+- Frontend style: functional React components; no state-management library unless necessary; no authentication unless explicitly requested.
 
 ## Known facts
-- iPhone camera JPEGs are detected by Pillow as format MPO (2 frames); `prepare_image` accepts them as JPEG, uses only the first frame and re-encodes it (fixed with synthetic tests; not yet verified with a real iPhone upload).
-- Frontend reads the API base URL from EXPO_PUBLIC_API_URL (frontend/.env). The README is partly stale.
+- iPhone camera JPEGs are detected by Pillow as format MPO (2 frames). Fixed by `prepare_image` (commit d2ea65f): MPO is accepted as JPEG, first frame only, re-encoded without metadata. User-verified on a physical iPhone against Render on 2026-10-03.
+- Frontend reads the API base URL from EXPO_PUBLIC_API_URL (frontend/.env).
+- Model: code default `gemini-2.5-flash` (config.py); backend/.env.example sets `gemini-3.1-flash-lite`; the model used on Render is not verifiable from the repo.
+
+## Planned / not implemented (do not describe as implemented)
+Authentication and database-backed accounts are currently deferred. None of this exists in the code:
+- User accounts and login.
+- Saved experiment logs (list, open, rename, delete).
+- Server-side storage of analyses so /ask and /quiz take an experiment_id (today they take a client-supplied analysis).
+- Per-user rate limiting.
+- Later assistant features: cross-experiment context, learning tracking.
+- RAG.
+
+## Known issues / follow-up tasks
+Details in docs/HANDOFF.md section 2.
+- Remove the temporary HealthDiagnostic panel (frontend/src/components/HealthDiagnostic.tsx).
+- No CORS; no auth or rate limiting on the public API.
+- /ask and /quiz trust the client-supplied analysis.
+- Reconcile eval variant names (code names differ from the handoff's recorded results).
+- Gemini's handling of 16-bit PNG is untested.
+- Default model mismatch (see Known facts); .env.example lacks MAX_ENCODED_IMAGE_BYTES.
+- A "server busy" 503 shows the app's generic 503 message.
 
 ## Honesty rules
 - Distinguish implemented / partial / planned. RAG is planned, not implemented.
