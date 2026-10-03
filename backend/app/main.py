@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.middleware import BodySizeLimitMiddleware
 from app.routes import analyze, ask, health, quiz
 from app.services.errors import AnalysisError
 
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ScopePilot", version="0.1.0", lifespan=lifespan)
+app.add_middleware(BodySizeLimitMiddleware)
 app.include_router(health.router)
 app.include_router(analyze.router)
 app.include_router(ask.router)
@@ -38,4 +40,4 @@ app.include_router(quiz.router)
 
 @app.exception_handler(AnalysisError)
 async def analysis_error_handler(request: Request, exc: AnalysisError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)

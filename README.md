@@ -10,7 +10,7 @@ Implemented:
 - Expo TypeScript app: gallery image selection, analysis display, follow-up Q&A, and quiz.
 - Braintrust prompt-evaluation harness (`backend/evals/microscopy_eval.py`).
 
-Not implemented: RAG, camera capture in the app, backend CORS (needed for the browser preview), user accounts, saved analyses, and per-user rate limiting. See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
+Not implemented: RAG, camera capture in the app, user accounts, saved analyses, and per-user rate limiting. Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
 
 ## Backend
 
@@ -26,7 +26,7 @@ Copy-Item backend/.env.example backend/.env
 
 Create the environment file only once; do not overwrite an existing configuration. Edit `backend/.env` and set `GEMINI_API_KEY` to your key. Environment variables override this file. Restart the backend after changes.
 
-`GEMINI_MODEL` selects the model; it must support image input and structured JSON output, and your key must have access to it. The default in `backend/app/config.py` is `gemini-2.5-flash`, which an earlier live check (see `progress.md`) found unavailable to new users. `backend/.env.example` sets `gemini-3.1-flash-lite`. Other settings: `GEMINI_TIMEOUT_SECONDS` (default 60), `MAX_IMAGE_BYTES` (10 MiB), `MAX_IMAGE_PIXELS` (20,000,000), `MAX_ENCODED_IMAGE_BYTES` (14 MiB; not listed in `.env.example`).
+`GEMINI_MODEL` selects the model; it must support image input and structured JSON output, and your key must have access to it. The default in `backend/app/config.py` is `gemini-2.5-flash`, which an earlier live check (see `progress.md`) found unavailable to new users. `backend/.env.example` sets `gemini-3.1-flash-lite`. Other settings: `GEMINI_FALLBACK_MODELS` (empty; up to 3 models tried only on quota or model-not-found errors, see `docs/HANDOFF.md`), `GEMINI_TIMEOUT_SECONDS` (default 60), `MAX_IMAGE_BYTES` (10 MiB), `MAX_IMAGE_PIXELS` (20,000,000), `MAX_ENCODED_IMAGE_BYTES` (14 MiB; not listed in `.env.example`), `MAX_JSON_BODY_BYTES` (64 KiB), `GEMINI_DAILY_CALL_LIMIT` (100). Numeric settings must be positive.
 
 `.env` files are ignored by Git; only `.env.example` belongs in version control. Never put API keys in source files or the frontend.
 
@@ -68,14 +68,22 @@ Errors use `{"detail":"..."}` (FastAPI validation errors use a detail list):
 | Status | Cause |
 |---|---|
 | 400 | Empty, corrupt, or undecodable image |
-| 413 | Upload over size limit, resolution over pixel limit, or re-encoded image too large |
+| 413 | Request body over limit, upload over size limit, resolution over pixel limit, or re-encoded image too large |
 | 415 | Unsupported declared type, content not matching the declared type, or multi-frame image |
-| 422 | Missing upload or invalid request body |
+| 422 | Missing upload, invalid request body, or `/ask`/`/quiz` analysis over the input caps |
 | 502 | Gemini provider, network, or response-validation failure; unavailable model |
-| 503 | Missing API key, Gemini quota/rate limit, or server busy decoding another image |
+| 503 | Missing API key, Gemini quota/rate limit, server busy decoding another image, or daily Gemini limit reached (with `Retry-After`) |
 | 504 | Gemini timeout |
 
 No automatic provider retries are made.
+
+### Request limits
+
+- **Body size** (`backend/app/middleware.py`): `/analyze` allows `MAX_IMAGE_BYTES` + 64 KiB of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES`; `/health` is exempt. A `Content-Length` over the limit gets 413 before anything is read; a chunked body is counted as it streams and gets 413 once it passes the limit.
+- **Input caps** for the analysis sent to `/ask` and `/quiz`: `probable_specimen` ≤ 300 characters, `explanation` ≤ 6000, each list ≤ 40 items of ≤ 1000 characters; over a cap gives 422. The `/analyze` response is not capped.
+- **Daily Gemini cap**: at most `GEMINI_DAILY_CALL_LIMIT` Gemini attempts per UTC day, fallback attempts included; then 503 with `Retry-After` (seconds until 00:00 UTC). The count is per process and resets on restart; Google's own quota reset time may differ from UTC midnight. Requests rejected before Gemini (bad images, caps, body size) do not count.
+- These are global limits, not per-user rate limiting or authentication.
+- **CORS is intentionally not enabled.** The native app does not need it, and CORS only restricts browsers, so it is not an abuse control. As a result the browser preview cannot call the API.
 
 ### Tests (from repository root)
 
@@ -133,4 +141,4 @@ npm.cmd run build
 
 The build exports Android/iOS JavaScript and Hermes bundles plus a web preview into ignored `frontend/dist`; it does not produce an APK or IPA. Tests use mocked HTTP responses and do not call the backend or Gemini.
 
-Optional layout preview: `npm.cmd run web`. The intended upload target is the native app; browser API requests would need backend CORS support, which is not configured.
+Optional layout preview: `npm.cmd run web`. The intended upload target is the native app; browser API requests would need backend CORS support, which is intentionally off.
