@@ -2,7 +2,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from app.schemas.analysis import Analysis
+from app.schemas.analysis import AnalysisInput
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -10,7 +10,7 @@ NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_lengt
 class QuizRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    analysis: Analysis
+    analysis: AnalysisInput
 
 
 class QuizQuestion(BaseModel):
