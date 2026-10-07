@@ -18,6 +18,8 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 ## Secrets and privacy
 - Never read, print, log or commit backend/.env, frontend/.env or any secret. Only the variable name GEMINI_API_KEY appears in code.
 - Never commit personal photos (EXIF/GPS). Test fixtures must be synthetic or public-domain.
+- Logbook data is accessed only through the backend with the Supabase secret key (SUPABASE_SECRET_KEY; bypasses row-level security), and every query must be scoped by the verified user_id. The secret key never goes in the app, the repo, logs or docs.
+- No key, token, password or Supabase project URL in any file.
 
 ## Working style
 - Inspect first, then explain the plan and the files to change. For risky changes, plan only and wait for approval.
@@ -33,19 +35,24 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 - Request limits: body size (app/middleware.py; /analyze = MAX_IMAGE_BYTES + 64 KiB, others MAX_JSON_BODY_BYTES, /health exempt); /ask and /quiz analysis caps (AnalysisInput); GEMINI_DAILY_CALL_LIMIT per UTC day per process, counts every attempt incl. fallbacks, 503 + Retry-After, resets on restart.
 - CORS is intentionally off: the native app does not need it, and CORS is not an abuse control.
 - App token: APP_TOKEN (backend) / EXPO_PUBLIC_APP_TOKEN (app) -> header X-ScopePilot-Token, checked before body parsing; empty = off; /health exempt; 401 "Unauthorized client.". It is compiled into the app bundle: a deterrent, NOT authentication. Rollout: ship the app, then set APP_TOKEN on Render, then confirm old builds get 401. Never put a real token in code, tests, docs or logs.
+- Logbook PRs 1 (scaffolding: Supabase schema, settings) and 2 (Supabase access-token verification in services/auth.py, BearerAuthMiddleware for /v1/*, GET /v1/me) are merged. /v1 returns 503 "Logbook not configured." unless SUPABASE_URL and SUPABASE_SECRET_KEY are both set.
+- Supabase and Render are running, but SUPABASE_URL and SUPABASE_SECRET_KEY must stay unset on Render until the experiment endpoints exist and the isolation tests pass.
+- Per-IP rate limiting is dropped; per-user limits (planned) replace it.
 
 ## Planned / not implemented (do not describe as implemented)
-Authentication and database-backed accounts are currently deferred. None of this exists in the code:
-- User accounts and login.
-- Saved experiment logs (list, open, rename, delete).
-- Server-side storage of analyses so /ask and /quiz take an experiment_id (today they take a client-supplied analysis).
-- Per-user rate limiting.
+Only token verification and GET /v1/me exist. None of this exists in the code yet (remaining logbook PRs, in order):
+- PR 3: create/read experiments.
+- PR 4: list/rename/save/delete experiments.
+- PR 5: experiment-scoped /ask and /quiz (experiment_id instead of a client-supplied analysis) plus the per-user Gemini cap.
+- PR 6: account deletion.
+- PR 7: legacy switch.
+- Then the frontend login and experiments screens (no login in the app today).
 - Later assistant features: cross-experiment context, learning tracking.
 - RAG.
 
 ## Known issues / follow-up tasks
 Details in docs/HANDOFF.md section 2.
-- No auth or per-user rate limiting on the public API (only global limits and a shared app token).
+- Legacy /analyze, /ask, /quiz have no user auth or per-user limits (only global limits and a shared app token) until the logbook PRs land.
 - Browser preview cannot call the API (CORS intentionally off).
 - /ask and /quiz trust the client-supplied analysis.
 - Reconcile eval variant names (code names differ from the handoff's recorded results).
