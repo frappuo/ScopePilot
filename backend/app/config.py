@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,19 @@ class Settings(BaseSettings):
     # Comma-separated; a str because pydantic-settings would JSON-decode a list.
     # Tried in order after gemini_model, only on quota (429) or missing model (404).
     gemini_fallback_models: str = ""
+    # Student logbook (Supabase). Empty supabase_url leaves the logbook unconfigured.
+    # The secret key bypasses row-level security: backend environment only, never the app.
+    supabase_url: str = ""
+    supabase_secret_key: SecretStr = SecretStr("")
+    logbook_bucket: str = Field(default="experiment-images", pattern=r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+    user_daily_gemini_limit: int = Field(default=20, gt=0)
+    max_saved_experiments_per_user: int = Field(default=50, gt=0)
+    max_drafts_per_user: int = Field(default=10, gt=0)
+    draft_ttl_hours: int = Field(default=24, gt=0, le=168)
+
+    @property
+    def logbook_configured(self) -> bool:
+        return bool(self.supabase_url and self.supabase_secret_key.get_secret_value().strip())
 
     @property
     def fallback_models(self) -> tuple[str, ...]:
@@ -42,6 +56,18 @@ class Settings(BaseSettings):
     def _limit_fallback_models(self) -> "Settings":
         if len(self.fallback_models) > 3:
             raise ValueError("GEMINI_FALLBACK_MODELS accepts at most 3 models.")
+        return self
+
+    @model_validator(mode="after")
+    def _normalise_supabase_url(self) -> "Settings":
+        url = self.supabase_url.strip().rstrip("/")
+        if url:
+            parsed = urlsplit(url)
+            # Project origin only, e.g. https://<project-ref>.supabase.co; https so tokens never travel in clear.
+            if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query \
+                    or parsed.fragment or parsed.username or parsed.password:
+                raise ValueError("SUPABASE_URL must be an https origin without a path.")
+        self.supabase_url = url
         return self
 
 
