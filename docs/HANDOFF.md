@@ -508,6 +508,36 @@ Limitations:
 -   Peak memory for one 20 MP image was measured on Windows at roughly
     +170–340 MiB (WebP highest); it has not been measured on Render.
 
+### Student logbook (in progress: scaffolding only)
+
+Planned slice 1: Supabase Auth login, saving an analysis as an
+experiment, and list/open/rename/delete. Only the scaffolding exists so
+far. Nothing reads these settings yet, and no endpoint uses them.
+
+-   Schema: `supabase/migrations/0001_logbook.sql` creates
+    `experiments`, `usage_daily`, the `consume_gemini_call` function
+    and a private `experiment-images` bucket. Row-level security is
+    on, with no policies, so the app's publishable key cannot touch
+    them. Only the backend (secret key) can.
+-   Settings: `SUPABASE_URL` (https origin), `SUPABASE_SECRET_KEY`
+    (backend host only, never the app or the repo), `LOGBOOK_BUCKET`,
+    `USER_DAILY_GEMINI_LIMIT`, `MAX_SAVED_EXPERIMENTS_PER_USER`,
+    `MAX_DRAFTS_PER_USER`, `DRAFT_TTL_HOURS`. The logbook counts as
+    configured only when both the URL and the secret key are set.
+
+Setup (manual, not yet verified against a real project):
+
+1.  Create a free Supabase project and choose the region deliberately.
+2.  Run the migration in the dashboard SQL editor.
+3.  Auth: enable email confirmation, configure a custom SMTP provider
+    (the built-in sender allows about 2 emails/hour), and use OTP codes
+    in the confirmation/recovery email templates.
+4.  Create a dedicated secret key for the backend and set the variables
+    above on Render.
+
+Free-tier caveats (from Supabase docs, 2026-10-07): projects pause
+after 7 days of inactivity, there are no backups, and storage is 1 GB.
+
 ## 6. Frontend and deployment
 
 The app has been tested on a physical iPhone (latest user-reported check:
