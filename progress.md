@@ -3,6 +3,34 @@
 Dated log, newest first. Current status, planned features, and known issues
 live in `docs/HANDOFF.md`.
 
+## Logbook PRs 1-2 Merged (2026-10-08)
+
+- PR 1 (scaffolding: Supabase schema, settings, setup notes) and PR 2
+  (Supabase access-token verification, `BearerAuthMiddleware` for `/v1/*`,
+  `GET /v1/me`) are merged. Backend suite: 258 passed, all offline (fake JWKS,
+  locally generated keys).
+- Remaining logbook PRs are planned, not implemented: 3 create/read
+  experiments, 4 list/rename/save/delete, 5 experiment-scoped ask/quiz plus
+  per-user cap, 6 account deletion, 7 legacy switch, then the frontend login
+  and experiments screens.
+- Per-IP rate limiting is dropped; per-user limits replace it.
+- Logbook data is accessed only through the backend with the Supabase secret
+  key, and every query must be scoped by the verified `user_id`. The secret key
+  never goes in the app, the repo, logs or docs.
+- Supabase and Render are running, but `SUPABASE_URL` and
+  `SUPABASE_SECRET_KEY` stay unset on Render until the experiment endpoints
+  exist and the isolation tests pass.
+- Not yet verified against a real Supabase token: JWKS signing keys, exact
+  `iss`, and presence of `is_anonymous`.
+
+### Next steps
+
+1. Create branch `feat/experiments-create-read`.
+2. Plan PR 3 (create/read experiments) in plan mode.
+3. Isolation tests (one user can never reach another's data), then a live
+   smoke test.
+4. Set `GEMINI_DAILY_CALL_LIMIT` on Render.
+
 ## Upload Fix, Docs Sync and Device Verification (2026-10-03)
 
 - Cause of the iPhone 415: iPhone camera JPEGs are detected by Pillow as format
