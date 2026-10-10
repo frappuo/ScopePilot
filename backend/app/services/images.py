@@ -17,6 +17,13 @@ ALLOWED_TYPES = frozenset(FORMATS.values())
 # One decode/re-encode at a time bounds peak memory (about 340 MiB for a 20 MP WebP).
 _DECODE_SLOTS = BoundedSemaphore(1)
 _DECODE_WAIT_SECONDS = 5.0
+_BUSY_DETAIL = "Server is busy processing another image. Please try again in a few seconds."
+# Display copies stored in the logbook bucket (file_size_limit 3 MiB in supabase/migrations/0001_logbook.sql).
+DISPLAY_MAX_EDGE = 2048
+DISPLAY_MAX_BYTES = 3 * 1024 * 1024
+_DISPLAY_QUALITIES = (85, 75, 65)
+THUMB_MAX_EDGE = 256
+THUMB_QUALITY = 80
 
 
 def _reject(
@@ -91,8 +98,7 @@ def prepare_image(data: bytes, content_type: str | None, settings: Settings) -> 
                     raise _reject(415, "Upload a single-frame image.", "multi_frame", content_type, detected_format)
                 image.verify()
             if not _DECODE_SLOTS.acquire(timeout=_DECODE_WAIT_SECONDS):
-                raise _reject(503, "Server is busy processing another image. Please try again in a few seconds.",
-                              "busy", content_type, detected_format)
+                raise _reject(503, _BUSY_DETAIL, "busy", content_type, detected_format)
             try:
                 encoded = _reencode(data, detected_format)
             finally:
@@ -106,3 +112,62 @@ def prepare_image(data: bytes, content_type: str | None, settings: Settings) -> 
         raise _reject(413, "The processed image is too large to analyze. Please choose a smaller image.",
                       "output_too_large", content_type, detected_format)
     return encoded, FORMATS[detected_format]
+
+
+def _to_rgb(image: Image.Image) -> Image.Image:
+    """8-bit RGB; transparency is composited onto white, 16-bit grayscale scaled to 8 bits."""
+    if image.mode in ("I;16", "I;16B", "I;16L", "I"):
+        image = image.convert("I").point(lambda value: value * (1 / 256)).convert("L")
+    if image.has_transparency_data:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, "white")
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return image if image.mode == "RGB" else image.convert("RGB")
+
+
+def _encode_jpeg(image: Image.Image, quality: int, icc_profile: bytes | None) -> bytes:
+    params: dict = {"quality": quality, "optimize": True}
+    if icc_profile:
+        params["icc_profile"] = icc_profile
+    output = BytesIO()
+    image.save(output, format="JPEG", **params)
+    return output.getvalue()
+
+
+def _display_copies(cleaned: bytes) -> tuple[bytes, bytes] | None:
+    with Image.open(BytesIO(cleaned)) as source:
+        source.load()
+        # Same rule as _reencode: the ICC profile only describes the unconverted mode.
+        icc_profile = source.info.get("icc_profile") if source.mode == "RGB" else None
+        display = _to_rgb(source)
+        display.info = {}  # prepare_image output is already metadata-free; keep it that way.
+        display.thumbnail((DISPLAY_MAX_EDGE, DISPLAY_MAX_EDGE), Image.Resampling.LANCZOS)
+        for quality in _DISPLAY_QUALITIES:
+            display_bytes = _encode_jpeg(display, quality, icc_profile)
+            if len(display_bytes) <= DISPLAY_MAX_BYTES:
+                break
+        else:
+            return None
+        thumb = display.copy()
+        thumb.thumbnail((THUMB_MAX_EDGE, THUMB_MAX_EDGE), Image.Resampling.LANCZOS)
+        return display_bytes, _encode_jpeg(thumb, THUMB_QUALITY, icc_profile)
+
+
+def make_display_copies(cleaned: bytes, mime: str) -> tuple[bytes, bytes]:
+    """JPEG display copy (long edge <= 2048 px) and 256 px thumbnail of prepare_image output.
+
+    Both are metadata-free. Gemini still receives the full cleaned bytes.
+    """
+    if not _DECODE_SLOTS.acquire(timeout=_DECODE_WAIT_SECONDS):
+        raise _reject(503, _BUSY_DETAIL, "busy", mime)
+    try:
+        copies = _display_copies(cleaned)
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+        raise _reject(400, "Image is corrupt or cannot be decoded.", "display_decode_error", mime) from exc
+    finally:
+        _DECODE_SLOTS.release()
+    if copies is None:
+        raise _reject(413, "The processed image is too large to store. Please choose a smaller image.",
+                      "display_too_large", mime)
+    return copies

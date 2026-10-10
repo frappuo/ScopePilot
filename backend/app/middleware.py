@@ -20,14 +20,16 @@ Send = Callable[[Message], Awaitable[None]]
 
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
 EXEMPT_PATHS = frozenset({"/health"})
-KNOWN_PATHS = frozenset({"/analyze", "/ask", "/quiz", "/v1/me"})
+KNOWN_PATHS = frozenset({"/analyze", "/ask", "/quiz", "/v1/me", "/v1/experiments"})
+IMAGE_UPLOAD_PATHS = frozenset({"/analyze", "/v1/experiments"})
+EXPERIMENT_PATH_PREFIX = "/v1/experiments/"
 TOKEN_HEADER = b"x-scopepilot-token"
 MAX_BEARER_TOKEN_BYTES = 8 * 1024
 INVALID_SESSION = {"detail": "Session expired or invalid."}
 
 
 def body_limit(path: str, settings: Settings) -> int:
-    if path == "/analyze":
+    if path in IMAGE_UPLOAD_PATHS:
         return settings.max_image_bytes + MULTIPART_OVERHEAD_BYTES
     return settings.max_json_body_bytes
 
@@ -56,7 +58,11 @@ def _content_length(scope: Scope) -> int | None:
 
 
 def _log_path(scope: Scope) -> str:
-    return scope["path"] if scope["path"] in KNOWN_PATHS else "other"
+    path = scope["path"]
+    if path in KNOWN_PATHS:
+        return path
+    # A template, so experiment IDs never reach the logs.
+    return "/v1/experiments/{id}" if path.startswith(EXPERIMENT_PATH_PREFIX) else "other"
 
 
 async def _send_json(send: Send, status: int, payload: dict[str, str],
