@@ -461,7 +461,7 @@ def test_thumbnail_upload_failure_deletes_both_paths(client, fake, caplog):
     assert fake.rows == {}
 
 
-def test_unexpected_error_before_insert_cleans_up_and_reraises(client, fake, monkeypatch):
+def test_unexpected_insert_error_cleans_up_and_reraises(client, fake, monkeypatch):
     boom = RuntimeError("synthetic failure")
 
     def fail(*args, **kwargs):
@@ -471,7 +471,9 @@ def test_unexpected_error_before_insert_cleans_up_and_reraises(client, fake, mon
     with pytest.raises(RuntimeError) as error:
         create(client)  # TestClient re-raises server exceptions by default.
     assert error.value is boom
+    (row_delete,) = fake.by("DELETE", "/rest/v1/experiments")
     (delete,) = fake.by("DELETE", "/storage/")
+    assert fake.requests.index(row_delete) < fake.requests.index(delete)
     assert len(json.loads(delete.content)["prefixes"]) == 2
     assert fake.objects == {}
 
@@ -514,12 +516,24 @@ def test_insert_committed_then_response_lost_deletes_row_then_objects(client, fa
 
 
 @pytest.mark.parametrize("failure", [500, "transport"])
-def test_row_delete_failure_keeps_objects(client, fake, caplog, failure):
+def test_row_delete_failure_keeps_objects(client, fake, caplog, monkeypatch, failure):
     # The row may still exist, so its images must not be deleted out from under it.
-    fake.fail["insert"] = "after_commit"
+    # The insert commits, then fails with a sentinel, so the test can tell the original
+    # exception apart from the row delete's 503.
+    boom = RuntimeError("synthetic failure after commit")
+    real_insert = logbook.insert_experiment
+
+    def commit_then_fail(*args, **kwargs):
+        real_insert(*args, **kwargs)
+        raise boom
+
+    monkeypatch.setattr(logbook, "insert_experiment", commit_then_fail)
     fake.fail["delete_row"] = failure
     with caplog.at_level(logging.WARNING):
-        assert create(client).status_code == 503
+        with pytest.raises(RuntimeError) as error:
+            create(client)  # TestClient re-raises server exceptions by default.
+    assert error.value is boom
+    assert len(fake.by("DELETE", "/rest/v1/experiments")) == 1
     assert fake.by("DELETE", "/storage/") == []
     assert len(fake.rows) == 1 and len(fake.objects) == 2
     assert "Logbook cleanup failed op=row" in caplog.text
@@ -571,6 +585,26 @@ def test_storage_paths_outside_user_prefix_are_refused(fake):
     with pytest.raises(logbook.LogbookPathError):
         logbook.upload_object("", "/x/image.jpg", b"x", s)
     assert fake.requests == []
+
+
+@pytest.mark.parametrize("user_id,experiment_id", [
+    ("", str(uuid.uuid4())),
+    (USER_A, ""),
+    (USER_A, "not-a-uuid"),
+    (USER_A, f"{uuid.uuid4()}&user_id=eq.{USER_B}"),
+])
+def test_row_delete_refuses_bad_arguments(fake, user_id, experiment_id):
+    with pytest.raises(ValueError):
+        logbook.delete_experiment_row(user_id, experiment_id, settings())
+    assert fake.requests == []
+
+
+def test_row_delete_sends_canonical_id(fake):
+    experiment_id = uuid.uuid4()
+    logbook.delete_experiment_row(USER_A, "{" + str(experiment_id).upper() + "}", settings())
+    (request,) = fake.requests
+    assert request.url.params["id"] == f"eq.{experiment_id}"
+    assert request.url.params["user_id"] == f"eq.{USER_A}"
 
 
 # --- display copies ------------------------------------------------------------------

@@ -558,6 +558,15 @@ Known trade-offs / deferred:
     one unit of the user's daily quota.
 -   The stored analysis has no length cap. Add one in PR 5, before it
     feeds `/ask` and `/quiz`.
+-   A timed-out insert can still commit after the cleanup row delete
+    has run: the delete finds nothing, so the images are deleted,
+    leaving a draft with no images that counts toward the draft cap
+    until it expires. Fix by setting a database statement timeout
+    shorter than the 10 s client timeout (`SUPABASE_TIMEOUT_SECONDS`)
+    in the PR 4 migration, so a timed-out insert always aborts.
+-   A stored image path containing `..` (possible only if the database
+    is tampered with) gives a 500 instead of the controlled 503. No
+    other user's file is signed.
 
 -   Schema: `supabase/migrations/0001_logbook.sql` creates
     `experiments`, `usage_daily`, the `consume_gemini_call` function
