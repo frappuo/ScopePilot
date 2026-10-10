@@ -343,3 +343,9 @@ def test_no_token_email_or_claims_in_logs(client, jwks, caplog):
     assert EMAIL not in text
     assert USER_ID not in text
     assert "kid-unknown" not in text
+
+
+def test_authenticated_user_repr_hides_email():
+    user = AuthenticatedUser(user_id=USER_ID, email="student@example.com")
+    assert "student@example.com" not in repr(user) and "student@example.com" not in str(user)
+    assert USER_ID in repr(user)

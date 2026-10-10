@@ -4,7 +4,7 @@ Nothing here logs: tokens, emails and claims must never reach the logs. Callers
 log the short reason codes carried by AuthError instead.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 import threading
 import time
@@ -30,7 +30,7 @@ REFETCH_COOLDOWN_SECONDS = 30
 @dataclass(frozen=True)
 class AuthenticatedUser:
     user_id: str
-    email: str | None
+    email: str | None = field(repr=False)  # Never in logs or error messages.
 
 
 class AuthError(Exception):

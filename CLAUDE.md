@@ -36,14 +36,16 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 - CORS is intentionally off: the native app does not need it, and CORS is not an abuse control.
 - App token: APP_TOKEN (backend) / EXPO_PUBLIC_APP_TOKEN (app) -> header X-ScopePilot-Token, checked before body parsing; empty = off; /health exempt; 401 "Unauthorized client.". It is compiled into the app bundle: a deterrent, NOT authentication. Rollout: ship the app, then set APP_TOKEN on Render, then confirm old builds get 401. Never put a real token in code, tests, docs or logs.
 - Logbook PRs 1 (scaffolding: Supabase schema, settings) and 2 (Supabase access-token verification in services/auth.py, BearerAuthMiddleware for /v1/*, GET /v1/me) are merged. /v1 returns 503 "Logbook not configured." unless SUPABASE_URL and SUPABASE_SECRET_KEY are both set.
+- Logbook PR 3 (branch feat/experiments-create-read, not yet merged): POST /v1/experiments (upload an image, analyze it, store it as a draft) and GET /v1/experiments/{id} (own experiment only; another user's ID gives 404). Create charges the per-user daily Gemini quota (consume_gemini_call, USER_DAILY_GEMINI_LIMIT).
+- Create order (services/logbook.py create_experiment): draft cap, prepare_image, make_display_copies, quota, Gemini, uploads, insert. A rejected image or a failed display copy costs no quota.
+- Insert-failure cleanup: the row is deleted first (the insert may have committed before its response was lost); the images are deleted only if the row delete succeeded, otherwise they are kept and "op=row" is logged.
 - Supabase and Render are running, but SUPABASE_URL and SUPABASE_SECRET_KEY must stay unset on Render until the experiment endpoints exist and the isolation tests pass.
 - Per-IP rate limiting is dropped; per-user limits (planned) replace it.
 
 ## Planned / not implemented (do not describe as implemented)
-Only token verification and GET /v1/me exist. None of this exists in the code yet (remaining logbook PRs, in order):
-- PR 3: create/read experiments.
+Only token verification, GET /v1/me and the PR 3 experiment create/read endpoints exist. None of this exists in the code yet (remaining logbook PRs, in order):
 - PR 4: list/rename/save/delete experiments.
-- PR 5: experiment-scoped /ask and /quiz (experiment_id instead of a client-supplied analysis) plus the per-user Gemini cap.
+- PR 5: experiment-scoped /ask and /quiz (experiment_id instead of a client-supplied analysis), charging the same per-user daily quota that create already uses since PR 3.
 - PR 6: account deletion.
 - PR 7: legacy switch.
 - Then the frontend login and experiments screens (no login in the app today).
