@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
+import hashlib
 import logging
 import math
 import re
@@ -104,6 +105,9 @@ identification must be probable, never guaranteed when ambiguous.
 Do not give medical diagnoses or artificial confidence percentages.
 Always state that AI output is tentative and needs student/instructor verification.
 Return only the requested structured response."""
+# Identifies the production analysis prompt stored with each experiment. Computed once at
+# import, so the eval harness's temporary PROMPT swap does not change it.
+PROMPT_VERSION = hashlib.sha256(PROMPT.encode("utf-8")).hexdigest()[:12]
 
 ASK_PROMPT = """You answer follow-up questions for biology students studying microscopy.
 Use the supplied analysis as tentative, unverified context rather than ground truth.
@@ -207,7 +211,7 @@ def _fallback_reason(exc: errors.APIError) -> str | None:
     return _FALLBACK_CODES.get(exc.code) or _FALLBACK_STATUSES.get(str(exc.status or "").upper())
 
 
-def _generate(
+def _generate_served(
     operation: str,
     settings: Settings,
     *,
@@ -217,8 +221,11 @@ def _generate(
     failure_message: str,
     invalid_message: str,
     allow_fallback: bool = True,
-) -> T:
-    """Call Gemini with the configured model, then fallbacks on quota/model-not-found only."""
+) -> tuple[T, str]:
+    """Call Gemini with the configured model, then fallbacks on quota/model-not-found only.
+
+    Returns the parsed result and the name of the model that served it.
+    """
     key = settings.gemini_api_key.get_secret_value().strip()
     if not key:
         raise AnalysisError(503, "Gemini API key is not configured on the backend.")
@@ -271,7 +278,7 @@ def _generate(
                     "Gemini served operation=%s model=%s fallback_used=%s",
                     operation, _safe_diagnostic_value(model), index > 0,
                 )
-                return result
+                return result, model
     except (httpx.TimeoutException, TimeoutError) as exc:
         _log_gemini_failure(operation, exc, "timeout")
         raise AnalysisError(504, "Gemini request timed out. Please try again.") from None
@@ -287,12 +294,38 @@ def _generate(
     raise AssertionError("models is never empty")
 
 
-def analyze_image(data: bytes, mime_type: str, settings: Settings, *, allow_fallback: bool = True) -> Analysis:
+def _generate(
+    operation: str,
+    settings: Settings,
+    *,
+    contents: object,
+    config: types.GenerateContentConfig,
+    parse: Callable[[types.GenerateContentResponse], T],
+    failure_message: str,
+    invalid_message: str,
+    allow_fallback: bool = True,
+) -> T:
+    return _generate_served(
+        operation,
+        settings,
+        contents=contents,
+        config=config,
+        parse=parse,
+        failure_message=failure_message,
+        invalid_message=invalid_message,
+        allow_fallback=allow_fallback,
+    )[0]
+
+
+def analyze_image_with_model(
+    data: bytes, mime_type: str, settings: Settings, *, allow_fallback: bool = True
+) -> tuple[Analysis, str]:
+    """analyze_image plus the name of the model that served the request."""
     # The provider's response_schema dialect rejects additionalProperties.
     # Keep extra="forbid" in local validation of the returned JSON.
     response_schema = Analysis.model_json_schema()
     response_schema.pop("additionalProperties", None)
-    return _generate(
+    return _generate_served(
         "analyze",
         settings,
         contents=[types.Part.from_bytes(data=data, mime_type=mime_type)],
@@ -307,6 +340,10 @@ def analyze_image(data: bytes, mime_type: str, settings: Settings, *, allow_fall
         invalid_message="Gemini returned an invalid or empty analysis. Please try again.",
         allow_fallback=allow_fallback,
     )
+
+
+def analyze_image(data: bytes, mime_type: str, settings: Settings, *, allow_fallback: bool = True) -> Analysis:
+    return analyze_image_with_model(data, mime_type, settings, allow_fallback=allow_fallback)[0]
 
 
 def answer_question(analysis: Analysis, question: str, settings: Settings) -> AskResponse:

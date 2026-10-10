@@ -6,12 +6,18 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.middleware import AppTokenMiddleware, BearerAuthMiddleware, BodySizeLimitMiddleware
-from app.routes import analyze, ask, health, me, quiz
+from app.routes import analyze, ask, experiments, health, me, quiz
 from app.services.errors import AnalysisError
 
 
 def _configure_logging() -> None:
-    """Send app.* logs (INFO and up) to stderr once; uvicorn does not configure them."""
+    """Send app.* logs (INFO and up) to stderr once; uvicorn does not configure them.
+
+    httpx logs every request URL at INFO (the Supabase project URL, user and experiment ids),
+    so it and httpcore are held at WARNING even if root logging is later set to INFO.
+    """
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     logger = logging.getLogger("app")
     logger.setLevel(logging.INFO)
     if not any(getattr(handler, "_scopepilot", False) for handler in logger.handlers):
@@ -41,6 +47,7 @@ app.include_router(analyze.router)
 app.include_router(ask.router)
 app.include_router(quiz.router)
 app.include_router(me.router)
+app.include_router(experiments.router)
 
 
 @app.exception_handler(AnalysisError)

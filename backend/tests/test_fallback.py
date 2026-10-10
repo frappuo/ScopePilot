@@ -208,6 +208,12 @@ def test_logging_configured_once():
     assert sum(getattr(handler, "_scopepilot", False) for handler in logger.handlers) == 1
 
 
+def test_httpx_request_logging_held_at_warning():
+    _configure_logging()
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
 @pytest.fixture
 def eval_module(monkeypatch):
     # Not loaded as "eval", so importing does not start a Braintrust run.
