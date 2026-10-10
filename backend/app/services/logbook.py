@@ -130,9 +130,18 @@ def insert_experiment(user_id: str, row: dict[str, Any], settings: Settings) -> 
 
 
 def delete_experiment_row(user_id: str, experiment_id: str, settings: Settings) -> None:
-    """Delete one row owned by user_id. Idempotent: a row that does not exist is not an error."""
+    """Delete one row owned by user_id. Idempotent: a row that does not exist is not an error.
+
+    An empty user_id or a non-UUID experiment_id is refused before any request.
+    """
+    if not user_id:
+        raise ValueError("user_id is required.")
+    try:
+        canonical = str(uuid.UUID(experiment_id))
+    except (TypeError, ValueError, AttributeError):
+        raise ValueError("experiment_id must be a UUID.") from None
     _request("delete_row", settings, "DELETE", "/rest/v1/experiments",
-             params={"id": f"eq.{experiment_id}", "user_id": f"eq.{user_id}"},
+             params={"id": f"eq.{canonical}", "user_id": f"eq.{user_id}"},
              headers={"Prefer": "return=minimal"})
 
 
