@@ -104,9 +104,11 @@ database-backed accounts are currently deferred.
     `experiment_id`. Today both accept the full analysis supplied by
     the client (`AskRequest.analysis`, `QuizRequest.analysis` in
     `backend/app/schemas/`).
--   Per-user rate limiting. Today there is only a global, per-process
-    daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`) and the mapping of a
-    Gemini 429 to a 503.
+-   Per-user rate limiting on `/analyze`, `/ask` and `/quiz`. Today they
+    have only a global, per-process daily Gemini cap
+    (`GEMINI_DAILY_CALL_LIMIT`) and the mapping of a Gemini 429 to a
+    503. The per-user daily quota applies only to `POST
+    /v1/experiments` (section 5, Student logbook).
 -   Later assistant features: context across experiments and learning
     tracking.
 -   RAG over trusted biology material.
@@ -508,11 +510,54 @@ Limitations:
 -   Peak memory for one 20 MP image was measured on Windows at roughly
     +170–340 MiB (WebP highest); it has not been measured on Render.
 
-### Student logbook (in progress: scaffolding only)
+### Student logbook (in progress: create and read)
 
 Planned slice 1: Supabase Auth login, saving an analysis as an
-experiment, and list/open/rename/delete. Only the scaffolding exists so
-far. Nothing reads these settings yet, and no endpoint uses them.
+experiment, and list/open/rename/delete. The backend now verifies
+Supabase access tokens (every `/v1/*` route, `GET /v1/me`) and can
+create and read experiments (PR 3). List, rename, save and delete
+(PR 4) and the app's login and experiment screens do not exist yet.
+
+-   `POST /v1/experiments` (multipart `image`): validates and cleans
+    the upload with `prepare_image`, analyzes it with Gemini, and
+    stores it as a draft that expires after `DRAFT_TTL_HOURS`. Stored
+    with it: a metadata-free JPEG display copy (long edge at most
+    2048 px), a 256 px thumbnail, the model that answered and a hash
+    of the production prompt (`PROMPT_VERSION`). Returns 201 with the
+    experiment and short-lived signed image URLs.
+    -   Order: draft cap (409), `prepare_image`, display copies, the
+        per-user daily quota (`consume_gemini_call`, 429 with
+        `Retry-After`), Gemini, uploads, insert. A rejected image or a
+        failed display copy costs no quota.
+    -   On failure: if Gemini fails, nothing is stored. If an upload
+        fails, the uploaded images are deleted. If the insert fails,
+        the row is deleted first (the insert may have committed before
+        its response was lost) and the images only if that succeeded;
+        otherwise they are kept so a surviving row keeps its images.
+-   `GET /v1/experiments/{id}`: returns the caller's own experiment
+    with freshly signed image URLs. Another user's ID, a non-UUID or
+    an expired draft gives the same 404 as a missing ID.
+-   Isolation lives in `backend/app/services/logbook.py`: every query
+    filters by the verified `user_id`, every storage path must start
+    with `<user_id>/`, and rows returned by Supabase are re-checked.
+    Logs carry operation names and status codes only.
+-   Tests use an in-memory fake of Supabase
+    (`backend/tests/test_experiments.py`); nothing has been run against
+    a real Supabase project yet.
+
+Known trade-offs / deferred:
+
+-   The draft cap can be exceeded under concurrent creates (the count
+    and the insert are separate requests), bounded by the user's daily
+    quota. Fix with a database-level limit in the PR 4 migration.
+-   Orphaned storage objects (a failed cleanup, or a crash between
+    upload and insert) persist until PR 4 (purge). PR 6 account
+    deletion must delete everything under the user's folder, not only
+    the files listed in rows.
+-   A Gemini failure, or hitting the server-wide daily cap, still costs
+    one unit of the user's daily quota.
+-   The stored analysis has no length cap. Add one in PR 5, before it
+    feeds `/ask` and `/quiz`.
 
 -   Schema: `supabase/migrations/0001_logbook.sql` creates
     `experiments`, `usage_daily`, the `consume_gemini_call` function
