@@ -542,8 +542,27 @@ create and read experiments (PR 3). List, rename, save and delete
     with `<user_id>/`, and rows returned by Supabase are re-checked.
     Logs carry operation names and status codes only.
 -   Tests use an in-memory fake of Supabase
-    (`backend/tests/test_experiments.py`); nothing has been run against
-    a real Supabase project yet.
+    (`backend/tests/test_experiments.py`).
+
+Verified live (2026-10-11, user-reported, against the real Supabase
+project):
+
+-   An `sb_secret_` key works with the `apikey` header alone (no
+    `Authorization` header).
+-   Storage upload and signed-URL request paths, and the `signedURL`
+    format the code expects (`/object/sign/...`).
+-   The quota RPC: `usage_daily` counted 1 after one create.
+-   The bucket limits accept the upload.
+-   Two-user isolation: user A reading A's experiment gets 200; user B
+    reading A's experiment gets 404.
+
+Still unverified:
+
+-   That deleting a storage path that was never stored returns 200
+    (cleanup after a failed or timed-out upload relies on this).
+-   Latency between Render and Supabase.
+-   Memory on Render for the second decode (the display copies) on
+    each create.
 
 Known trade-offs / deferred:
 
