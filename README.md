@@ -33,7 +33,7 @@ Create the environment file only once; do not overwrite an existing configuratio
 ### Run (from repository root)
 
 ```powershell
-.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --no-access-log --ws none
 ```
 
 Keep this terminal open. In a second PowerShell terminal:
@@ -128,7 +128,7 @@ Pop-Location
 For local testing, start the backend so the phone can reach it (stop any older backend on that port first):
 
 ```powershell
-.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000
+.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000 --no-access-log --ws none
 ```
 
 Connect the phone and computer to the same trusted Wi-Fi. Find the computer's Wi-Fi IPv4 address with `ipconfig`. If needed, allow Python through Windows Firewall on the private network. The app reads the backend address from `EXPO_PUBLIC_API_URL` (normally set in `frontend/.env`; a PowerShell variable of the same name overrides it). Replace `192.168.1.100` below with your address:

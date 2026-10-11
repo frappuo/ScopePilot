@@ -315,7 +315,22 @@ services contain model/application logic.
 
   `/quiz`                 POST                    Generate quiz questions
                                                   from analysis context.
+
+  `/v1/me`                GET                     The signed-in user
+                                                  (Supabase token).
+
+  `/v1/experiments`       POST, GET               Create a draft from an
+                                                  image; list own saved
+                                                  experiments and live
+                                                  drafts (PR 4 branch).
+
+  `/v1/experiments/{id}`  GET, PATCH, DELETE      Read, edit/save
+                                                  (PATCH and DELETE on
+                                                  the PR 4 branch).
   -----------------------------------------------------------------------
+
+The `/v1` routes are the student logbook (section 5, "Student
+logbook"); they need a Supabase access token.
 
 ### `/analyze` request flow
 
@@ -516,7 +531,9 @@ Planned slice 1: Supabase Auth login, saving an analysis as an
 experiment, and list/open/rename/delete. The backend now verifies
 Supabase access tokens (every `/v1/*` route, `GET /v1/me`) and can
 create and read experiments (PR 3). List, rename, save and delete
-(PR 4) and the app's login and experiment screens do not exist yet.
+exist on the PR 4 branch (`feat/experiments-list-patch-delete`, not
+yet merged; migration 0002 not yet applied). The app's login and
+experiment screens do not exist yet.
 
 -   `POST /v1/experiments` (multipart `image`): validates and cleans
     the upload with `prepare_image`, analyzes it with Gemini, and
@@ -534,6 +551,16 @@ create and read experiments (PR 3). List, rename, save and delete
         the row is deleted first (the insert may have committed before
         its response was lost) and the images only if that succeeded;
         otherwise they are kept so a surviving row keeps its images.
+        On the PR 4 branch the insert goes through `create_draft`
+        (draft cap under a per-user lock, nothing written after a
+        deadline 8 s out), and the row cleanup waits until 2 s past
+        that deadline and then calls `discard_draft`.
+-   PR 4 branch: `GET /v1/experiments` (own saved experiments and live
+    drafts, newest first, cursor paging, thumbnail URLs only), `PATCH
+    /v1/experiments/{id}` (title/notes, save a draft; saved cap 409),
+    `DELETE /v1/experiments/{id}` (row first, then images), and a
+    best-effort purge of drafts expired for over 5 minutes after each
+    create and list.
 -   `GET /v1/experiments/{id}`: returns the caller's own experiment
     with freshly signed image URLs. Another user's ID, a non-UUID or
     an expired draft gives the same 404 as a missing ID.
@@ -566,28 +593,68 @@ Still unverified:
 
 Known trade-offs / deferred:
 
--   The draft cap can be exceeded under concurrent creates (the count
-    and the insert are separate requests), bounded by the user's daily
-    quota. Fix with a database-level limit in the PR 4 migration.
--   Orphaned storage objects (a failed cleanup, or a crash between
-    upload and insert) persist until PR 4 (purge). PR 6 account
-    deletion must delete everything under the user's folder, not only
-    the files listed in rows.
+-   Addressed in PR 4 (branch `feat/experiments-list-patch-delete`;
+    migration `0002_logbook_caps.sql` not yet applied): the draft-cap
+    race (now enforced in the database under a per-user lock); the
+    insert-timeout race (5 s statement timeout, a create deadline and
+    `discard_draft`); the 500 for a stored `..` path (now 503); the
+    stale `_auth_headers` comment.
+-   Orphaned storage objects persist until a sweeper exists: a crash
+    between upload and insert, a failed image delete, or an expired-draft
+    purge whose delete was still running when its re-check read. PR 6
+    account deletion must delete everything under the user's folder,
+    not only the files listed in rows.
 -   A Gemini failure, or hitting the server-wide daily cap, still costs
     one unit of the user's daily quota.
 -   The stored analysis has no length cap. Add one in PR 5, before it
     feeds `/ask` and `/quiz`.
--   A timed-out insert can still commit after the cleanup row delete
-    has run: the delete finds nothing, so the images are deleted,
-    leaving a draft with no images that counts toward the draft cap
-    until it expires. Fix by setting a database statement timeout
-    shorter than the 10 s client timeout (`SUPABASE_TIMEOUT_SECONDS`)
-    in the PR 4 migration, so a timed-out insert always aborts.
--   A stored image path containing `..` (possible only if the database
-    is tampered with) gives a 500 instead of the controlled 503. No
-    other user's file is signed.
--   PR 4: update the stale 'not yet verified' comment in
-    `_auth_headers` (now verified live).
+-   The draft and saved caps rely on PostgREST's default READ COMMITTED
+    isolation (each count runs after the per-user advisory lock). Under
+    REPEATABLE READ or stricter, the snapshot predates the lock and a
+    concurrent create could be missed. Keep the default, or switch to
+    per-user counter rows locked with SELECT ... FOR UPDATE.
+-   Migration 0002 sets a 5 s `statement_timeout` on `service_role`,
+    which covers every backend statement. PR 6 account deletion (cascade
+    plus storage cleanup) and any backfill must set a longer timeout for
+    their own transaction.
+-   No per-user rate limit on `/v1` list, PATCH and DELETE, and every
+    list (and create) also starts an expired-draft purge (2-4 Supabase
+    calls). Add per-user limits, and run the purge at most once per user
+    per few minutes.
+-   On an insert failure, cleanup waits until 2 s past the create
+    deadline (up to about 10 s) before `discard_draft`, and holds a
+    threadpool worker meanwhile. The client already gets a 503; the
+    worker cost matters only if insert failures become frequent.
+-   Clock skew: the create deadline tolerates the database clock
+    lagging Render's by about 2 s (minus the discard call's latency);
+    an earlier revision tolerated only about 0.5 s, and an earlier note
+    wrongly said 2 s. Beyond that, a queued create can still insert
+    after its images were deleted (a draft without images until the
+    purge). Future hardening: a tombstone written by `discard_draft`
+    and checked by `create_draft`, which removes the clock dependence.
+    The purge margin assumes the clocks agree within 5 minutes.
+-   `discard_draft` returns false both when no row exists and when the
+    row is no longer a draft, and cleanup treats both as success. A
+    draft saved from another session during the cleanup wait would lose
+    its images. Future fix: a three-way result (deleted / absent /
+    kept), deleting images only for deleted or absent.
+-   `discard_draft` waits up to 6 s for the per-user lock, longer than
+    the 5 s statement timeout, so a create still running finishes or
+    rolls back first. If the discard still fails (transport error), the
+    images are kept; if the create had rolled back, they are orphaned.
+-   GET treats an expired draft as missing (404) while DELETE still
+    deletes it (204). This is intended. GET decides expiry on the
+    backend clock; the database functions use the database's clock.
+-   Logs: Render's start command lives in the dashboard (not the repo)
+    and must include `--no-access-log --ws none`. `--ws none` matters
+    because WebSocket handshakes log the path and query on
+    `uvicorn.error`, which the access-log flag does not cover.
+    `app/main.py` also templates IDs and drops query strings in
+    uvicorn's access log as a backstop. Never run with
+    `--log-level trace` in production: it logs whole requests,
+    including the Authorization header. Render's own HTTP request logs,
+    and Supabase's API logs (which see `user_id=eq.<uid>` and experiment
+    IDs in query strings), may still record them.
 
 -   Schema: `supabase/migrations/0001_logbook.sql` creates
     `experiments`, `usage_daily`, the `consume_gemini_call` function
@@ -603,7 +670,11 @@ Known trade-offs / deferred:
 Setup (manual, not yet verified against a real project):
 
 1.  Create a free Supabase project and choose the region deliberately.
-2.  Run the migration in the dashboard SQL editor.
+2.  Run the migrations in the dashboard SQL editor: `0001_logbook.sql`,
+    then `0002_logbook_caps.sql`. **Apply 0002 BEFORE setting
+    `SUPABASE_URL`/`SUPABASE_SECRET_KEY` on Render**: without it,
+    `create_draft` and `discard_draft` return 404 and every create
+    leaves orphaned images.
 3.  Auth: enable email confirmation, configure a custom SMTP provider
     (the built-in sender allows about 2 emails/hour), and use OTP codes
     in the confirmation/recovery email templates.
@@ -921,13 +992,13 @@ Start backend from `backend/`:
 
 ``` powershell
 .\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --no-access-log --ws none
 ```
 
 If venv is active:
 
 ``` powershell
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --no-access-log --ws none
 ```
 
 Local API: `http://127.0.0.1:8000`\

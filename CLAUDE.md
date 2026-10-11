@@ -6,7 +6,7 @@ Full context: @docs/HANDOFF.md. It may lag the code; the repo is the source of t
 
 ## Commands (PowerShell, repo root)
 - Backend tests: `Push-Location backend; .\.venv\Scripts\python.exe -m pytest -q --basetemp="$env:USERPROFILE\pytest-tmp"; Pop-Location` (basetemp avoids Windows temp-folder permission errors)
-- Run backend: `.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000`
+- Run backend: `.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --no-access-log --ws none` (use both flags on Render too: --ws none stops WebSocket handshakes logging path and query; app/main.py also templates IDs and drops query strings in uvicorn's access log as a backstop)
 - Frontend (from frontend/): `npm.cmd run typecheck`, `npm.cmd test`, `npm.cmd run build`
 - Eval (from backend/): set `$env:SCOPEPILOT_EVAL_PROMPT_VARIANT` then `.\.venv\Scripts\braintrust.exe eval evals/microscopy_eval.py`
 

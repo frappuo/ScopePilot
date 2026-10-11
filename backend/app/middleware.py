@@ -20,7 +20,7 @@ Send = Callable[[Message], Awaitable[None]]
 
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
 EXEMPT_PATHS = frozenset({"/health"})
-KNOWN_PATHS = frozenset({"/analyze", "/ask", "/quiz", "/v1/me", "/v1/experiments"})
+KNOWN_PATHS = frozenset({"/health", "/analyze", "/ask", "/quiz", "/v1/me", "/v1/experiments"})
 IMAGE_UPLOAD_PATHS = frozenset({"/analyze", "/v1/experiments"})
 EXPERIMENT_PATH_PREFIX = "/v1/experiments/"
 TOKEN_HEADER = b"x-scopepilot-token"
@@ -57,12 +57,16 @@ def _content_length(scope: Scope) -> int | None:
         return None  # Fall back to counting streamed bytes.
 
 
-def _log_path(scope: Scope) -> str:
-    path = scope["path"]
+def log_path(path: str) -> str:
+    """A path safe to log: known paths as-is, experiment IDs templated, anything else "other"."""
     if path in KNOWN_PATHS:
         return path
     # A template, so experiment IDs never reach the logs.
     return "/v1/experiments/{id}" if path.startswith(EXPERIMENT_PATH_PREFIX) else "other"
+
+
+def _log_path(scope: Scope) -> str:
+    return log_path(scope["path"])
 
 
 async def _send_json(send: Send, status: int, payload: dict[str, str],

@@ -1,10 +1,12 @@
 """Logbook create/read (/v1/experiments). Hermetic: Supabase is an httpx.MockTransport fake,
 the Gemini SDK is mocked, tokens map to fixed users, and every value is a dummy."""
 
+import base64
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import json
 import logging
+import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 import uuid
@@ -44,32 +46,188 @@ def now():
 
 
 class FakeSupabase:
-    """In-memory PostgREST + Storage. Records every request; `fail` maps an op to a status or "transport"
-    ("insert" also takes "after_commit": the row is stored, then the response is lost)."""
+    """In-memory PostgREST + Storage, mirroring the SQL in supabase/migrations. Records every request.
+
+    `fail` maps an op to a status or "transport" ("insert" also takes "after_commit": the row is
+    stored, then the response is lost). `hooks` maps an op to a callable run just before it, to
+    simulate a concurrent request.
+    """
 
     def __init__(self):
         self.rows: dict[str, dict] = {}
         self.objects: dict[str, bytes] = {}
         self.requests: list[httpx.Request] = []
         self.fail: dict[str, object] = {}
+        self.hooks: dict[str, object] = {}
         self.quota_body = b"true"
-        self.insert_body: bytes | None = None  # Raw 201 body for the insert; None returns the row.
+        self.insert_body: bytes | None = None  # Raw body for create_draft; None runs the function.
+        self.update_body: bytes | None = None  # Raw body for update_experiment; None runs the function.
+        self.discard_body: bytes | None = None  # Raw body for discard_draft; None runs the function.
+        self.delete_body: bytes | None = None  # Raw body for the experiment DELETE; None returns the rows.
+        self.waits: list[float] = []  # Seconds logbook._wait was asked to sleep.
         self.get_body: bytes | None = None  # Raw 200 body for the experiment GET; None filters rows.
+        self.list_extra: list[dict] = []  # Rows appended to every list response.
         self.signed = 0
 
-    def add_draft(self, user_id, expires_in=timedelta(hours=1)):
+    def add_draft(self, user_id, expires_in=timedelta(hours=1), created_at=None, **fields):
         experiment_id = str(uuid.uuid4())
+        created = (created_at or now()).isoformat()
         self.rows[experiment_id] = {
             "id": experiment_id, "user_id": user_id, "status": "draft", "title": None, "notes": "",
             "analysis": RESULT, "model": "primary", "prompt_version": gemini.PROMPT_VERSION,
             "image_path": f"{user_id}/{experiment_id}/image.jpg", "thumb_path": f"{user_id}/{experiment_id}/thumb.jpg",
-            "image_bytes": 1, "created_at": now().isoformat(), "updated_at": now().isoformat(),
-            "saved_at": None, "expires_at": (now() + expires_in).isoformat(),
+            "image_bytes": 1, "created_at": created, "updated_at": created,
+            "saved_at": None, "expires_at": (now() + expires_in).isoformat(), **fields,
         }
         return experiment_id
 
+    def add_saved(self, user_id, title="Onion epidermis", **fields):
+        return self.add_draft(user_id, **{"status": "saved", "title": title, "saved_at": now().isoformat(),
+                                          "expires_at": None, **fields})
+
+    def store_objects(self, experiment_id):
+        row = self.rows[experiment_id]
+        for key in ("image_path", "thumb_path"):
+            self.objects[row[key]] = b"stored"
+
     def by(self, method, prefix):
         return [r for r in self.requests if r.method == method and r.url.path.startswith(prefix)]
+
+    def inserts(self):
+        return self.by("POST", "/rest/v1/rpc/create_draft")
+
+    def discards(self):
+        return self.by("POST", "/rest/v1/rpc/discard_draft")
+
+    @staticmethod
+    def _live(row, at):
+        return row["status"] == "saved" or datetime.fromisoformat(row["expires_at"]) > at
+
+    def _list(self, params):
+        # The exact logic tree list_experiments sends; anything else is a test failure.
+        match = re.fullmatch(
+            r'\(or\(status\.eq\.saved,expires_at\.gt\."(?P<now>[^"]+)"\)'
+            r'(?:,or\(created_at\.lt\."(?P<c>[^"]+)",and\(created_at\.eq\."(?P=c)",id\.lt\.(?P<i>[0-9a-f-]{36})\)\))?\)',
+            params["and"])
+        assert match, f"unexpected list filter {params['and']}"
+        at = datetime.fromisoformat(match["now"])
+        rows = [r for r in self.rows.values() if f"eq.{r['user_id']}" == params["user_id"] and self._live(r, at)]
+        if match["c"]:
+            after = (datetime.fromisoformat(match["c"]), match["i"])
+            rows = [r for r in rows if (datetime.fromisoformat(r["created_at"]), r["id"]) < after]
+        assert params["order"] == "created_at.desc,id.desc"
+        rows.sort(key=lambda r: (datetime.fromisoformat(r["created_at"]), r["id"]), reverse=True)
+        selected = []
+        for row in rows[: int(params["limit"])]:
+            item = {}
+            for column in params["select"].split(","):
+                alias, _, expression = column.partition(":")
+                if expression:
+                    assert expression == "analysis->>probable_specimen"
+                    item[alias] = row["analysis"]["probable_specimen"]
+                else:
+                    item[column] = row[column]
+            selected.append(item)
+        return selected + self.list_extra
+
+    def _matching(self, params):
+        """Rows matched by a DELETE's id (eq. or in.), user_id and optional status/expires_at filters."""
+        id_filter = params["id"]
+        ids = set(id_filter.removeprefix("in.(").removesuffix(")").split(",")) if id_filter.startswith("in.") \
+            else {id_filter.removeprefix("eq.")}
+        found = [r for r in self.rows.values() if r["id"] in ids and f"eq.{r['user_id']}" == params["user_id"]]
+        if "status" in params:
+            found = [r for r in found if f"eq.{r['status']}" == params["status"]]
+        if "expires_at" in params:
+            cutoff = datetime.fromisoformat(params["expires_at"].removeprefix("lte."))
+            found = [r for r in found if r["expires_at"] and datetime.fromisoformat(r["expires_at"]) <= cutoff]
+        return found
+
+    def _create_draft(self, request, body):
+        committed_then_lost = self.fail.get("insert") == "after_commit"
+        failure = None if committed_then_lost else self._failure("insert", request)
+        if failure:
+            return failure
+        user, experiment_id = body["p_user"], body["p_id"]
+        if not user or not experiment_id or not body["p_ttl_hours"] or body["p_ttl_hours"] <= 0 \
+                or body["p_image_path"] != f"{user}/{experiment_id}/image.jpg" \
+                or body["p_thumb_path"] != f"{user}/{experiment_id}/thumb.jpg":
+            return httpx.Response(200, json={"result": "invalid_arguments"})
+        if body["p_deadline"] is None or now() > datetime.fromisoformat(body["p_deadline"]):
+            return httpx.Response(200, json={"result": "late"})
+        live = [r for r in self.rows.values()
+                if r["user_id"] == user and r["status"] == "draft" and self._live(r, now())]
+        if body["p_max_drafts"] is None or len(live) >= body["p_max_drafts"]:
+            return httpx.Response(200, json={"result": "draft_limit"})
+        row = {
+            "id": body["p_id"], "user_id": user, "status": "draft", "title": None, "notes": "",
+            "analysis": body["p_analysis"], "model": body["p_model"], "prompt_version": body["p_prompt_version"],
+            "image_path": body["p_image_path"], "thumb_path": body["p_thumb_path"],
+            "image_bytes": body["p_image_bytes"], "created_at": now().isoformat(), "updated_at": now().isoformat(),
+            "saved_at": None, "expires_at": (now() + timedelta(hours=body["p_ttl_hours"])).isoformat(),
+        }
+        self.rows[row["id"]] = row
+        if committed_then_lost:
+            raise httpx.ReadTimeout("fake lost response", request=request)
+        if self.insert_body is not None:  # The row is stored; only the response is replaced.
+            return httpx.Response(200, content=self.insert_body)
+        return httpx.Response(200, json={"result": "ok", "row": row})
+
+    def _discard_draft(self, request, body):
+        failure = self._failure("discard_draft", request)
+        if failure:
+            return failure
+        if self.discard_body is not None:
+            return httpx.Response(200, content=self.discard_body)
+        row = self.rows.get(body["p_id"])
+        if row is None or row["user_id"] != body["p_user"] or row["status"] != "draft":
+            return httpx.Response(200, json=False)
+        del self.rows[body["p_id"]]
+        return httpx.Response(200, json=True)
+
+    def _update_experiment(self, request, body):
+        failure = self._failure("update", request)
+        if failure:
+            return failure
+        if self.update_body is not None:
+            return httpx.Response(200, content=self.update_body)
+        row = self.rows.get(body["p_id"])
+        if row is None or row["user_id"] != body["p_user"] or not self._live(row, now()):
+            return httpx.Response(200, json={"result": "not_found"})
+        saving = body["p_save"] and row["status"] == "draft"
+        if saving:
+            if (body["p_title"] if body["p_title"] is not None else row["title"]) is None:
+                return httpx.Response(200, json={"result": "title_required"})
+            saved = [r for r in self.rows.values() if r["user_id"] == body["p_user"] and r["status"] == "saved"]
+            if body["p_max_saved"] is None or len(saved) >= body["p_max_saved"]:
+                return httpx.Response(200, json={"result": "saved_limit"})
+        if body["p_title"] is not None:
+            row["title"] = body["p_title"]
+        if body["p_notes"] is not None:
+            row["notes"] = body["p_notes"]
+        if saving:
+            row.update(status="saved", saved_at=now().isoformat())
+        if body["p_save"]:
+            row["expires_at"] = None
+        row["updated_at"] = now().isoformat()
+        return httpx.Response(200, json={"result": "ok", "row": row})
+
+    @staticmethod
+    def _op(path, method, params, request):
+        """Names the request the way logbook.py does, for `fail` and `hooks`."""
+        if path.startswith("/rest/v1/rpc/"):
+            return path.removeprefix("/rest/v1/rpc/")
+        if path != "/rest/v1/experiments":
+            return None
+        if method == "GET":
+            if "and" in params:
+                return "list"
+            if "status" in params:
+                return "purge_select" if params["expires_at"].startswith("lte.") else "count"
+            return "purge_recheck" if params.get("id", "").startswith("in.") else "get"
+        if method == "DELETE" and request.headers.get("prefer") == "return=representation":
+            return "purge_delete" if params["id"].startswith("in.") else "delete_experiment"
+        return None
 
     def _failure(self, op, request):
         outcome = self.fail.get(op)
@@ -85,9 +243,52 @@ class FakeSupabase:
         path, method, params = request.url.path, request.method, request.url.params
         body = json.loads(request.content) if request.headers.get("content-type") == "application/json" else None
 
+        op = self._op(path, method, params, request)
+        if op in self.hooks:
+            self.hooks.pop(op)()
+
         if path == "/rest/v1/rpc/consume_gemini_call":
             return self._failure("rpc", request) or httpx.Response(
                 200, content=self.quota_body, headers={"content-type": "application/json"})
+        if path == "/rest/v1/rpc/create_draft":
+            return self._create_draft(request, body)
+        if path == "/rest/v1/rpc/update_experiment":
+            return self._update_experiment(request, body)
+        if path == "/rest/v1/rpc/discard_draft":
+            return self._discard_draft(request, body)
+        if op == "list":
+            return self._failure("list", request) or httpx.Response(200, json=self._list(params))
+        if op == "purge_select":
+            failure = self._failure("purge_select", request)
+            if failure:
+                return failure
+            cutoff = datetime.fromisoformat(params["expires_at"].removeprefix("lte."))
+            expired = sorted((r for r in self.rows.values()
+                              if f"eq.{r['user_id']}" == params["user_id"] and r["status"] == "draft"
+                              and datetime.fromisoformat(r["expires_at"]) <= cutoff),
+                             key=lambda r: r["expires_at"])
+            return httpx.Response(200, json=[{"id": r["id"]} for r in expired][: int(params["limit"])])
+        if op == "purge_recheck":
+            failure = self._failure("purge_recheck", request)
+            if failure:
+                return failure
+            ids = set(params["id"].removeprefix("in.(").removesuffix(")").split(","))
+            return httpx.Response(200, json=[{"id": r["id"]} for r in self.rows.values()
+                                             if r["id"] in ids and f"eq.{r['user_id']}" == params["user_id"]])
+        if op in ("delete_experiment", "purge_delete"):
+            # "after_commit": the rows are deleted, then the response is lost.
+            committed_then_lost = self.fail.get(op) == "after_commit"
+            failure = None if committed_then_lost else self._failure(op, request)
+            if failure:
+                return failure
+            found = self._matching(params)
+            for row in found:
+                del self.rows[row["id"]]
+            if committed_then_lost:
+                raise httpx.ReadTimeout("fake lost response", request=request)
+            if op == "delete_experiment" and self.delete_body is not None:
+                return httpx.Response(200, content=self.delete_body)
+            return httpx.Response(200, json=[{"id": row["id"]} for row in found])
         if path == "/rest/v1/experiments" and method == "GET" and "status" in params:
             failure = self._failure("count", request)
             if failure:
@@ -107,29 +308,6 @@ class FakeSupabase:
             found = [{c: r[c] for c in columns} for r in self.rows.values()
                      if f"eq.{r['id']}" == params["id"] and f"eq.{r['user_id']}" == params["user_id"]]
             return httpx.Response(200, json=found)
-        if path == "/rest/v1/experiments" and method == "POST":
-            # "after_commit": the row is stored, then the response is lost (timeout or reset).
-            committed_then_lost = self.fail.get("insert") == "after_commit"
-            failure = None if committed_then_lost else self._failure("insert", request)
-            if failure:
-                return failure
-            row = {"title": None, "notes": "", "saved_at": None,
-                   "created_at": now().isoformat(), "updated_at": now().isoformat(), **body}
-            self.rows[row["id"]] = row
-            if committed_then_lost:
-                raise httpx.ReadTimeout("fake lost response", request=request)
-            if self.insert_body is not None:
-                return httpx.Response(201, content=self.insert_body)
-            columns = params["select"].split(",")
-            return httpx.Response(201, json=[{c: row[c] for c in columns}])
-        if path == "/rest/v1/experiments" and method == "DELETE":
-            failure = self._failure("delete_row", request)
-            if failure:
-                return failure
-            for experiment_id in [i for i, r in self.rows.items()
-                                  if f"eq.{i}" == params["id"] and f"eq.{r['user_id']}" == params["user_id"]]:
-                del self.rows[experiment_id]
-            return httpx.Response(204)
         if path == f"/storage/v1/object/sign/{BUCKET}":
             failure = self._failure("sign", request)
             if failure:
@@ -206,6 +384,7 @@ def jpeg_with_metadata():
 def fake(monkeypatch):
     supabase = FakeSupabase()
     monkeypatch.setattr(logbook, "_transport", httpx.MockTransport(supabase))
+    monkeypatch.setattr(logbook, "_wait", supabase.waits.append)  # Records instead of sleeping.
     return supabase
 
 
@@ -239,12 +418,13 @@ def assert_scoped(requests, user_id, other_id):
     for request in requests:
         path = request.url.path
         body = json.loads(request.content) if request.headers.get("content-type") == "application/json" else None
-        if path == "/rest/v1/experiments" and request.method == "POST":
-            assert body["user_id"] == user_id
-            assert body["image_path"].startswith(prefix) and body["thumb_path"].startswith(prefix)
+        if path == "/rest/v1/rpc/create_draft":
+            assert body["p_user"] == user_id
+            assert body["p_image_path"].startswith(prefix) and body["p_thumb_path"].startswith(prefix)
         elif path == "/rest/v1/experiments":
             assert request.url.params["user_id"] == f"eq.{user_id}"
-        elif path == "/rest/v1/rpc/consume_gemini_call":
+        elif path in ("/rest/v1/rpc/consume_gemini_call", "/rest/v1/rpc/update_experiment",
+                      "/rest/v1/rpc/discard_draft"):
             assert body["p_user"] == user_id
         elif path == f"/storage/v1/object/sign/{BUCKET}":
             assert all(p.startswith(prefix) for p in body["paths"])
@@ -311,25 +491,29 @@ def test_expired_draft_is_404(client, fake):
     assert client.get(f"/v1/experiments/{experiment_id}", headers=auth()).json() == NOT_FOUND
 
 
-def test_row_with_foreign_storage_path_is_refused(client, fake):
+@pytest.mark.parametrize("path", [f"{USER_B}/x/image.jpg", f"{USER_A}/../{USER_B}/x/image.jpg"])
+def test_row_with_foreign_storage_path_is_refused(client, fake, path):
+    # A ".." path gives the controlled 503, not a 500 from sign_urls.
     experiment_id = fake.add_draft(USER_A)
-    fake.rows[experiment_id]["image_path"] = f"{USER_B}/{experiment_id}/image.jpg"
+    fake.rows[experiment_id]["image_path"] = path
     response = client.get(f"/v1/experiments/{experiment_id}", headers=auth())
-    assert response.status_code == 503
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
     assert fake.by("POST", "/storage/v1/object/sign/") == []
 
 
-@pytest.mark.parametrize("where", ["read", "insert"])
+@pytest.mark.parametrize("where", ["read", "insert", "update"])
 def test_row_owned_by_another_user_is_refused(client, fake, where):
-    experiment_id = fake.add_draft(USER_A)
+    experiment_id = fake.add_draft(USER_A, title="Onion")
     foreign = {**fake.rows[experiment_id], "user_id": USER_B}
-    body = json.dumps([foreign]).encode()
     if where == "read":
-        fake.get_body = body
+        fake.get_body = json.dumps([foreign]).encode()
         response = client.get(f"/v1/experiments/{experiment_id}", headers=auth())
-    else:
-        fake.insert_body = body
+    elif where == "insert":
+        fake.insert_body = json.dumps({"result": "ok", "row": foreign}).encode()
         response = create(client)
+    else:
+        fake.update_body = json.dumps({"result": "ok", "row": foreign}).encode()
+        response = client.patch(f"/v1/experiments/{experiment_id}", json={"notes": "x"}, headers=auth())
     assert response.status_code == 503 and response.json() == UNAVAILABLE
     assert USER_B not in response.text and RESULT["probable_specimen"] not in response.text
     assert fake.by("POST", "/storage/v1/object/sign/") == []
@@ -405,7 +589,8 @@ def test_expired_and_other_users_drafts_do_not_count(client, fake):
 
 def test_draft_count_timestamp_is_url_encoded(client, fake):
     create(client)
-    (count,) = [r for r in fake.by("GET", "/rest/v1/experiments") if "status" in r.url.params]
+    (count,) = [r for r in fake.by("GET", "/rest/v1/experiments")
+                if r.url.params.get("expires_at", "").startswith("gt.")]  # Not the purge's lte. query.
     query = count.url.query.decode()
     assert "expires_at=gt." in query
     assert "%2B" in query and "+" not in query
@@ -429,7 +614,7 @@ def test_gemini_failure_stores_nothing(client, fake, sdk, break_gemini, status):
     assert create(client).status_code == status
     assert len(fake.by("POST", "/rest/v1/rpc/")) == 1  # The quota unit was taken.
     assert fake.by("POST", "/storage/") == []
-    assert fake.by("POST", "/rest/v1/experiments") == []
+    assert fake.inserts() == []
     assert fake.objects == {} and fake.rows == {}
 
 
@@ -457,7 +642,7 @@ def test_thumbnail_upload_failure_deletes_both_paths(client, fake, caplog):
     assert image.startswith(f"{USER_A}/") and image.endswith("/image.jpg")
     assert thumb == image.removesuffix("image.jpg") + "thumb.jpg"
     assert "Logbook cleanup failed op=upload objects=2" in caplog.text
-    assert fake.by("POST", "/rest/v1/experiments") == []
+    assert fake.inserts() == []
     assert fake.rows == {}
 
 
@@ -471,9 +656,9 @@ def test_unexpected_insert_error_cleans_up_and_reraises(client, fake, monkeypatc
     with pytest.raises(RuntimeError) as error:
         create(client)  # TestClient re-raises server exceptions by default.
     assert error.value is boom
-    (row_delete,) = fake.by("DELETE", "/rest/v1/experiments")
+    (discard,) = fake.discards()
     (delete,) = fake.by("DELETE", "/storage/")
-    assert fake.requests.index(row_delete) < fake.requests.index(delete)
+    assert fake.requests.index(discard) < fake.requests.index(delete)
     assert len(json.loads(delete.content)["prefixes"]) == 2
     assert fake.objects == {}
 
@@ -497,22 +682,61 @@ def test_cleanup_failure_is_logged(client, fake, caplog):
 
 
 def inserted_id(fake):
-    (insert,) = fake.by("POST", "/rest/v1/experiments")
-    return json.loads(insert.content)["id"]
+    (insert,) = fake.inserts()
+    return json.loads(insert.content)["p_id"]
 
 
 def test_insert_committed_then_response_lost_deletes_row_then_objects(client, fake):
     fake.fail["insert"] = "after_commit"
     response = create(client)
     assert response.status_code == 503 and response.json() == UNAVAILABLE
-    (row_delete,) = fake.by("DELETE", "/rest/v1/experiments")
+    (discard,) = fake.discards()
     (object_delete,) = fake.by("DELETE", "/storage/")
-    assert fake.requests.index(row_delete) < fake.requests.index(object_delete)
-    assert row_delete.url.params["id"] == f"eq.{inserted_id(fake)}"
-    assert row_delete.url.params["user_id"] == f"eq.{USER_A}"
-    assert row_delete.headers["prefer"] == "return=minimal"
+    assert fake.requests.index(discard) < fake.requests.index(object_delete)
+    assert json.loads(discard.content) == {"p_user": USER_A, "p_id": inserted_id(fake)}
     assert len(json.loads(object_delete.content)["prefixes"]) == 2
     assert fake.rows == {} and fake.objects == {}
+
+
+def test_cleanup_waits_for_the_create_deadline_before_discarding(client, fake):
+    fake.fail["insert"] = 500
+    assert create(client).status_code == 503
+    (wait,) = fake.waits
+    # Until DISCARD_MARGIN_SECONDS past the deadline, so a lagging database clock still sees "late".
+    assert 9 < wait <= logbook.CREATE_DEADLINE_SECONDS + logbook.DISCARD_MARGIN_SECONDS
+    (insert,) = fake.inserts()
+    deadline = datetime.fromisoformat(json.loads(insert.content)["p_deadline"])
+    assert timedelta(seconds=7) < deadline - now() <= timedelta(seconds=logbook.CREATE_DEADLINE_SECONDS)
+    assert len(fake.discards()) == 1
+
+
+@pytest.mark.parametrize("outcome,setup", [
+    ("late", lambda fake, monkeypatch: monkeypatch.setattr(logbook, "CREATE_DEADLINE_SECONDS", -1)),
+    ("invalid_arguments", lambda fake, monkeypatch: setattr(fake, "insert_body", b'{"result": "invalid_arguments"}')),
+])
+def test_create_draft_wrote_nothing_cleans_images_without_discard(client, fake, monkeypatch, caplog, outcome, setup):
+    setup(fake, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        response = create(client)
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert f"Logbook request failed op=insert status={outcome}" in caplog.text
+    assert fake.discards() == [] and fake.waits == []
+    (cleanup,) = fake.by("DELETE", "/storage/")
+    assert len(json.loads(cleanup.content)["prefixes"]) == 2
+    if outcome == "late":
+        assert fake.rows == {}
+    assert fake.objects == {}
+
+
+@pytest.mark.parametrize("body", [b'"true"', b"null", b"[true]", b"not json"])
+def test_discard_non_boolean_keeps_objects(client, fake, caplog, body):
+    fake.fail["insert"] = "after_commit"
+    fake.discard_body = body
+    with caplog.at_level(logging.WARNING):
+        assert create(client).status_code == 503
+    assert "Logbook cleanup failed op=row" in caplog.text
+    assert fake.by("DELETE", "/storage/") == []
+    assert len(fake.rows) == 1 and len(fake.objects) == 2
 
 
 @pytest.mark.parametrize("failure", [500, "transport"])
@@ -528,12 +752,12 @@ def test_row_delete_failure_keeps_objects(client, fake, caplog, monkeypatch, fai
         raise boom
 
     monkeypatch.setattr(logbook, "insert_experiment", commit_then_fail)
-    fake.fail["delete_row"] = failure
+    fake.fail["discard_draft"] = failure
     with caplog.at_level(logging.WARNING):
         with pytest.raises(RuntimeError) as error:
             create(client)  # TestClient re-raises server exceptions by default.
     assert error.value is boom
-    assert len(fake.by("DELETE", "/rest/v1/experiments")) == 1
+    assert len(fake.discards()) == 1
     assert fake.by("DELETE", "/storage/") == []
     assert len(fake.rows) == 1 and len(fake.objects) == 2
     assert "Logbook cleanup failed op=row" in caplog.text
@@ -566,8 +790,8 @@ def test_image_upload_failure_cleans_up(client, fake):
     (delete,) = fake.by("DELETE", "/storage/")
     (path,) = json.loads(delete.content)["prefixes"]
     assert path.startswith(f"{USER_A}/") and path.endswith("/image.jpg")
-    assert fake.by("DELETE", "/rest/v1/experiments") == []  # Upload stage: no row delete.
-    assert fake.by("POST", "/rest/v1/experiments") == []
+    assert fake.discards() == []  # Upload stage: no row to discard.
+    assert fake.inserts() == []
     assert fake.objects == {} and fake.rows == {}
 
 
@@ -593,18 +817,532 @@ def test_storage_paths_outside_user_prefix_are_refused(fake):
     (USER_A, "not-a-uuid"),
     (USER_A, f"{uuid.uuid4()}&user_id=eq.{USER_B}"),
 ])
-def test_row_delete_refuses_bad_arguments(fake, user_id, experiment_id):
+def test_discard_refuses_bad_arguments(fake, user_id, experiment_id):
     with pytest.raises(ValueError):
-        logbook.delete_experiment_row(user_id, experiment_id, settings())
+        logbook.discard_draft(user_id, experiment_id, settings())
     assert fake.requests == []
 
 
-def test_row_delete_sends_canonical_id(fake):
+def test_discard_sends_canonical_id(fake):
     experiment_id = uuid.uuid4()
-    logbook.delete_experiment_row(USER_A, "{" + str(experiment_id).upper() + "}", settings())
+    assert logbook.discard_draft(USER_A, "{" + str(experiment_id).upper() + "}", settings()) is False
     (request,) = fake.requests
-    assert request.url.params["id"] == f"eq.{experiment_id}"
-    assert request.url.params["user_id"] == f"eq.{USER_A}"
+    assert json.loads(request.content) == {"p_user": USER_A, "p_id": str(experiment_id)}
+
+
+def test_discard_never_removes_a_saved_row(fake):
+    experiment_id = fake.add_saved(USER_A)
+    assert logbook.discard_draft(USER_A, experiment_id, settings()) is False
+    assert experiment_id in fake.rows
+
+
+# --- draft cap (database) ----------------------------------------------------------
+
+
+def test_create_draft_rpc_arguments(client, fake):
+    create(client)
+    (insert,) = fake.inserts()
+    body = json.loads(insert.content)
+    assert body["p_user"] == USER_A
+    assert body["p_max_drafts"] == 10 and body["p_ttl_hours"] == 24
+    assert body["p_image_path"] == f"{USER_A}/{body['p_id']}/image.jpg"
+    assert body["p_thumb_path"] == f"{USER_A}/{body['p_id']}/thumb.jpg"
+    assert body["p_analysis"] == RESULT and body["p_model"] == "primary"
+    deadline = datetime.fromisoformat(body["p_deadline"])
+    assert body["p_deadline"].endswith("Z")
+    assert timedelta(seconds=7) < deadline - now() <= timedelta(seconds=8)
+
+
+def test_draft_cap_race_is_409_and_cleans_up(client, fake, sdk):
+    # The pre-check sees 9 drafts; a concurrent create takes the last slot before create_draft runs.
+    for _ in range(9):
+        fake.add_draft(USER_A)
+    fake.hooks["create_draft"] = lambda: fake.add_draft(USER_A)
+    response = create(client)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Too many unsaved drafts. Save or discard one first."}
+    assert len(fake.rows) == 10
+    assert sdk.call_count == 1 and len(fake.by("POST", "/rest/v1/rpc/consume_gemini_call")) == 1
+    assert fake.discards() == [] and fake.waits == []  # No row was written, so nothing to discard.
+    (cleanup,) = fake.by("DELETE", "/storage/")
+    assert len(json.loads(cleanup.content)["prefixes"]) == 2
+    assert fake.objects == {}
+
+
+# --- list ----------------------------------------------------------------------------
+
+
+def list_page(client, user="A", **params):
+    return client.get("/v1/experiments", params=params, headers=auth(user))
+
+
+def cursor_of(value):
+    return base64.urlsafe_b64encode(value.encode()).decode()
+
+
+def test_list_own_saved_and_live_drafts_newest_first(client, fake):
+    base = now() - timedelta(hours=1)
+    saved = fake.add_saved(USER_A, created_at=base)
+    draft = fake.add_draft(USER_A, created_at=base + timedelta(minutes=1))
+    fake.add_draft(USER_A, expires_in=timedelta(seconds=-1), created_at=base + timedelta(minutes=2))
+    fake.add_saved(USER_B, created_at=base + timedelta(minutes=3))
+    response = list_page(client)
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["id"] for item in body["items"]] == [draft, saved]
+    assert body["next_cursor"] is None and body["thumb_url_expires_in"] == 600
+    first, second = body["items"]
+    assert first["status"] == "draft" and first["expires_at"] and first["saved_at"] is None
+    assert second["status"] == "saved" and second["title"] == "Onion epidermis" and second["expires_at"] is None
+    assert first["probable_specimen"] == RESULT["probable_specimen"]
+    assert first["thumb_url"].startswith(f"{SUPABASE_URL}/storage/v1/object/sign/{BUCKET}/{USER_A}/{draft}/thumb.jpg?")
+    assert all("image_url" not in item for item in body["items"])
+    (sign,) = fake.by("POST", "/storage/v1/object/sign/")
+    assert all(path.endswith("/thumb.jpg") for path in json.loads(sign.content)["paths"])
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_list_paging_with_cursor(client, fake):
+    base = now() - timedelta(hours=1)
+    tie = base + timedelta(minutes=2)
+    ids = [fake.add_saved(USER_A, created_at=base + timedelta(minutes=minute)) for minute in (0, 1, 3)]
+    ids += [fake.add_saved(USER_A, created_at=tie) for _ in range(2)]  # Same created_at: id breaks the tie.
+    expected = sorted(ids, key=lambda i: (fake.rows[i]["created_at"], i), reverse=True)
+    seen, cursor, pages = [], None, 0
+    while True:
+        body = list_page(client, limit=2, **({"cursor": cursor} if cursor else {})).json()
+        seen += [item["id"] for item in body["items"]]
+        pages += 1
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == expected
+    assert pages == 3
+
+
+@pytest.mark.parametrize("cursor", [
+    "not base64 at all!",
+    cursor_of("not json"),
+    cursor_of(json.dumps([1, 2])),
+    cursor_of(json.dumps({"i": str(uuid.uuid4())})),
+    cursor_of(json.dumps({"c": "2026-10-12T10:00:00+00:00", "i": "not-a-uuid"})),
+    cursor_of(json.dumps({"c": "2026-10-12T10:00:00", "i": str(uuid.uuid4())})),  # No timezone.
+    cursor_of(json.dumps({"c": '2026-10-12T10:00:00+00:00",id.gt.0', "i": str(uuid.uuid4())})),
+    cursor_of(json.dumps({"c": "0001-01-01T00:00:00+05:00", "i": str(uuid.uuid4())})),  # Overflows in UTC.
+    cursor_of(json.dumps({"c": "1999-12-31T00:00:00+00:00", "i": str(uuid.uuid4())})),
+    cursor_of(json.dumps({"c": "9999-12-31T00:00:00+00:00", "i": str(uuid.uuid4())})),
+])
+def test_list_invalid_cursor_is_400_without_supabase(client, fake, cursor):
+    response = list_page(client, cursor=cursor)
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid cursor."}
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 51}, {"limit": "x"}, {"cursor": ""}, {"cursor": "a" * 201}])
+def test_list_bad_query_is_422_without_supabase(client, fake, params):
+    assert list_page(client, **params).status_code == 422
+    assert fake.requests == []
+
+
+def test_list_limits(client, fake):
+    for _ in range(3):
+        fake.add_saved(USER_A)
+    list_page(client)
+    list_page(client, limit=50)
+    first, second = [r for r in fake.by("GET", "/rest/v1/experiments") if "and" in r.url.params]
+    assert first.url.params["limit"] == "21" and second.url.params["limit"] == "51"  # One extra row means more.
+
+
+@pytest.mark.parametrize("extra", [
+    {"user_id": USER_B, "thumb_path": f"{USER_B}/x/thumb.jpg"},
+    {"user_id": USER_A, "thumb_path": f"{USER_B}/x/thumb.jpg"},
+    {"user_id": USER_A, "thumb_path": f"{USER_A}/../{USER_B}/x/thumb.jpg"},
+])
+def test_list_refuses_foreign_rows(client, fake, extra):
+    fake.add_saved(USER_A)
+    fake.list_extra = [{"id": str(uuid.uuid4()), "status": "saved", "title": "x", "created_at": now().isoformat(),
+                        "saved_at": now().isoformat(), "expires_at": None, "probable_specimen": "x", **extra}]
+    response = list_page(client)
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert USER_B not in response.text
+    assert fake.by("POST", "/storage/v1/object/sign/") == []
+
+
+def test_list_signing_failure_gives_null_thumbs(client, fake):
+    fake.add_saved(USER_A)
+    fake.fail["sign"] = 500
+    response = list_page(client)
+    assert response.status_code == 200
+    assert [item["thumb_url"] for item in response.json()["items"]] == [None]
+
+
+def test_list_empty(client, fake):
+    response = list_page(client)
+    assert response.json() == {"items": [], "next_cursor": None, "thumb_url_expires_in": 600}
+    assert fake.by("POST", "/storage/") == []
+
+
+# --- edit and save -------------------------------------------------------------------
+
+
+def patch(client, experiment_id, body, user="A"):
+    return client.patch(f"/v1/experiments/{experiment_id}", json=body, headers=auth(user))
+
+
+def test_patch_edits_draft_without_saving(client, fake):
+    experiment_id = fake.add_draft(USER_A)
+    expires_at = fake.rows[experiment_id]["expires_at"]
+    response = patch(client, experiment_id, {"title": "  Onion epidermis  ", "notes": "Stained with iodine."})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["title"] == "Onion epidermis" and body["notes"] == "Stained with iodine."
+    assert body["status"] == "draft" and body["saved_at"] is None
+    assert datetime.fromisoformat(body["expires_at"]) == datetime.fromisoformat(expires_at)
+    assert body["image_url"] and body["thumb_url"]
+    (call,) = fake.by("POST", "/rest/v1/rpc/update_experiment")
+    assert json.loads(call.content) == {
+        "p_user": USER_A, "p_id": experiment_id, "p_title": "Onion epidermis", "p_notes": "Stained with iodine.",
+        "p_save": False, "p_max_saved": 50,
+    }
+
+
+def test_patch_saves_draft(client, fake):
+    experiment_id = fake.add_draft(USER_A)
+    response = patch(client, experiment_id, {"status": "saved", "title": "Onion epidermis"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "saved" and body["title"] == "Onion epidermis"
+    assert body["saved_at"] is not None and body["expires_at"] is None
+    row = fake.rows[experiment_id]
+    assert row["status"] == "saved" and row["expires_at"] is None
+
+
+def test_resaving_keeps_saved_at(client, fake):
+    experiment_id = fake.add_saved(USER_A, saved_at="2026-10-01T09:00:00+00:00")
+    response = patch(client, experiment_id, {"status": "saved", "notes": "Second look."})
+    assert response.status_code == 200
+    assert datetime.fromisoformat(response.json()["saved_at"]) == datetime.fromisoformat("2026-10-01T09:00:00+00:00")
+    assert fake.rows[experiment_id]["notes"] == "Second look."
+
+
+def test_save_without_title_is_422(client, fake):
+    experiment_id = fake.add_draft(USER_A)
+    response = patch(client, experiment_id, {"status": "saved"})
+    assert response.status_code == 422
+    assert response.json() == {"detail": "A title is required to save."}
+    assert fake.rows[experiment_id]["status"] == "draft"
+
+
+def test_saved_cap_is_409(client, fake):
+    use_settings(max_saved_experiments_per_user=2)
+    for _ in range(2):
+        fake.add_saved(USER_A)
+    for _ in range(3):
+        fake.add_saved(USER_B)  # Other users' saved experiments do not count.
+    experiment_id = fake.add_draft(USER_A, title="Onion")
+    response = patch(client, experiment_id, {"status": "saved"})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Too many saved experiments. Delete one first."}
+    assert fake.rows[experiment_id]["status"] == "draft"
+    (call,) = fake.by("POST", "/rest/v1/rpc/update_experiment")
+    assert json.loads(call.content)["p_max_saved"] == 2
+
+
+@pytest.mark.parametrize("target", ["other_user", "missing", "expired"])
+def test_patch_not_found(client, fake, target):
+    if target == "other_user":
+        experiment_id = fake.add_draft(USER_B, title="Theirs")
+    elif target == "expired":
+        experiment_id = fake.add_draft(USER_A, title="Theirs", expires_in=timedelta(seconds=-1))
+    else:
+        experiment_id = str(uuid.uuid4())
+    response = patch(client, experiment_id, {"title": "Mine now"})
+    assert response.status_code == 404 and response.json() == NOT_FOUND
+    if target != "missing":
+        assert fake.rows[experiment_id]["title"] == "Theirs"
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_patch_non_uuid_is_404_without_supabase(client, fake):
+    for bad in ("not-a-uuid", "1"):
+        response = patch(client, bad, {"title": "x"})
+        assert response.status_code == 404 and response.json() == NOT_FOUND
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"title": None, "notes": None}, {"title": "x" * 121}, {"title": "   "}, {"notes": "x" * 5001},
+    {"status": "draft"}, {"title": "ok", "user_id": USER_B}, [],
+    {"title": "a\x00b"}, {"title": "two\nlines"}, {"notes": "a\x00b"}, {"notes": "bell\x07"},
+    # Invisible or reordering characters: right-to-left override, zero-width space, C1 next line,
+    # line separator.
+    {"title": "file‮txt.exe"}, {"title": "zero​width"}, {"title": "c1\x85next"}, {"title": "line sep"},
+])
+def test_patch_invalid_body_is_422_without_supabase(client, fake, body):
+    experiment_id = fake.add_draft(USER_A)
+    assert patch(client, experiment_id, body).status_code == 422
+    assert fake.requests == []
+
+
+def test_patch_accepts_maximum_lengths(client, fake):
+    experiment_id = fake.add_draft(USER_A)
+    response = patch(client, experiment_id, {"title": "t" * 120, "notes": "n" * 5000})
+    assert response.status_code == 200
+
+
+# --- delete --------------------------------------------------------------------------
+
+
+def delete(client, experiment_id, user="A"):
+    return client.delete(f"/v1/experiments/{experiment_id}", headers=auth(user))
+
+
+def test_delete_own_experiment(client, fake):
+    experiment_id = fake.add_saved(USER_A)
+    fake.store_objects(experiment_id)
+    response = delete(client, experiment_id)
+    assert response.status_code == 204 and response.content == b""
+    assert experiment_id not in fake.rows and fake.objects == {}
+    (row_delete,) = fake.by("DELETE", "/rest/v1/experiments")
+    (object_delete,) = fake.by("DELETE", "/storage/")
+    assert fake.requests.index(row_delete) < fake.requests.index(object_delete)
+    assert row_delete.url.params["id"] == f"eq.{experiment_id}"
+    assert row_delete.url.params["user_id"] == f"eq.{USER_A}"
+    assert json.loads(object_delete.content)["prefixes"] == [
+        f"{USER_A}/{experiment_id}/image.jpg", f"{USER_A}/{experiment_id}/thumb.jpg"]
+
+
+def test_delete_other_users_experiment_is_404(client, fake):
+    experiment_id = fake.add_saved(USER_B)
+    fake.store_objects(experiment_id)
+    response = delete(client, experiment_id)
+    assert response.status_code == 404 and response.json() == NOT_FOUND
+    assert experiment_id in fake.rows and len(fake.objects) == 2
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_delete_missing_and_non_uuid(client, fake):
+    assert delete(client, uuid.uuid4()).json() == NOT_FOUND
+    fake.requests.clear()
+    for bad in ("not-a-uuid", "1"):
+        response = delete(client, bad)
+        assert response.status_code == 404 and response.json() == NOT_FOUND
+    assert fake.requests == []
+
+
+def test_delete_expired_draft_is_204(client, fake):
+    experiment_id = fake.add_draft(USER_A, expires_in=timedelta(seconds=-1))
+    assert delete(client, experiment_id).status_code == 204
+    assert experiment_id not in fake.rows
+
+
+def test_delete_storage_failure_still_204(client, fake, caplog):
+    experiment_id = fake.add_saved(USER_A)
+    fake.store_objects(experiment_id)
+    fake.fail["delete"] = 500
+    with caplog.at_level(logging.WARNING):
+        assert delete(client, experiment_id).status_code == 204
+    assert experiment_id not in fake.rows and len(fake.objects) == 2
+    assert "Logbook cleanup failed op=delete objects=2" in caplog.text
+    assert experiment_id not in caplog.text and USER_A not in caplog.text
+
+
+def test_delete_retry_removes_leftover_objects(client, fake):
+    experiment_id = fake.add_saved(USER_A)
+    fake.store_objects(experiment_id)
+    fake.fail["delete"] = 500
+    assert delete(client, experiment_id).status_code == 204
+    fake.fail.clear()
+    assert delete(client, experiment_id).status_code == 404
+    assert fake.objects == {}
+
+
+@pytest.mark.parametrize("failure", [500, "transport"])
+def test_delete_row_failure_is_503_and_keeps_objects(client, fake, failure):
+    experiment_id = fake.add_saved(USER_A)
+    fake.store_objects(experiment_id)
+    fake.fail["delete_experiment"] = failure
+    response = delete(client, experiment_id)
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert fake.by("DELETE", "/storage/") == []
+    assert experiment_id in fake.rows and len(fake.objects) == 2
+
+
+@pytest.mark.parametrize("rows", [[{"id": "other"}], [{"id": "same"}, {"id": "same"}], {"id": "same"}])
+def test_delete_wrong_response_is_503_and_keeps_objects(client, fake, rows):
+    experiment_id = fake.add_saved(USER_A)
+    fake.store_objects(experiment_id)
+    other = str(uuid.uuid4())
+    substitute = {"other": other, "same": experiment_id}
+    if isinstance(rows, list):
+        rows = [{"id": substitute[row["id"]]} for row in rows]
+    else:
+        rows = {"id": substitute[rows["id"]]}
+    fake.delete_body = json.dumps(rows).encode()
+    response = delete(client, experiment_id)
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert fake.by("DELETE", "/storage/") == []
+    assert len(fake.objects) == 2
+
+
+def test_patch_wrong_id_response_is_503(client, fake):
+    experiment_id = fake.add_draft(USER_A, title="Mine")
+    other = fake.add_draft(USER_A, title="Other")  # Same user, valid paths, different id.
+    fake.update_body = json.dumps({"result": "ok", "row": fake.rows[other]}).encode()
+    response = patch(client, experiment_id, {"notes": "x"})
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert fake.by("POST", "/storage/v1/object/sign/") == []
+
+
+def test_patch_accepts_multiline_notes(client, fake):
+    experiment_id = fake.add_draft(USER_A)
+    response = patch(client, experiment_id, {"notes": "Line one\nLine two\twith a tab\r\n"})
+    assert response.status_code == 200
+    assert fake.rows[experiment_id]["notes"] == "Line one\nLine two\twith a tab\r\n"
+
+
+# --- purge of expired drafts ---------------------------------------------------------
+
+
+def expired_draft(fake, user_id=USER_A, ago=timedelta(minutes=10)):
+    # Past the 5-minute purge margin (logbook.PURGE_GRACE) unless ago says otherwise.
+    experiment_id = fake.add_draft(user_id, expires_in=-ago)
+    fake.store_objects(experiment_id)
+    return experiment_id
+
+
+def test_purge_margin_keeps_recently_expired_drafts(client, fake):
+    recent = expired_draft(fake, ago=timedelta(minutes=1))
+    old = expired_draft(fake)
+    body = list_page(client).json()
+    assert body["items"] == []  # Both are hidden from the list at once.
+    assert recent in fake.rows and old not in fake.rows
+    assert sorted(fake.objects) == sorted([fake.rows[recent]["image_path"], fake.rows[recent]["thumb_path"]])
+    (select,) = [r for r in fake.by("GET", "/rest/v1/experiments") if r.url.params.get("order") == "expires_at.asc"]
+    cutoff = datetime.fromisoformat(select.url.params["expires_at"].removeprefix("lte."))
+    assert timedelta(minutes=4, seconds=50) < now() - cutoff <= timedelta(minutes=5, seconds=10)
+
+
+def test_purge_delete_response_lost_still_removes_images(client, fake, caplog):
+    experiment_id = expired_draft(fake)
+    fake.fail["purge_delete"] = "after_commit"
+    with caplog.at_level(logging.WARNING):
+        assert list_page(client).status_code == 200
+    assert experiment_id not in fake.rows and fake.objects == {}
+    (recheck,) = [r for r in fake.by("GET", "/rest/v1/experiments") if r.url.params.get("id", "").startswith("in.")]
+    assert recheck.url.params["user_id"] == f"eq.{USER_A}"
+    assert "Logbook purge failed op=delete" in caplog.text
+    assert experiment_id not in caplog.text and USER_A not in caplog.text
+
+
+def test_purge_delete_failure_keeps_images_of_remaining_rows(client, fake):
+    experiment_id = expired_draft(fake)
+    fake.fail["purge_delete"] = 500
+    assert list_page(client).status_code == 200
+    assert experiment_id in fake.rows and len(fake.objects) == 2
+    assert fake.by("DELETE", "/storage/") == []
+
+
+def test_purge_recheck_failure_keeps_images(client, fake, caplog):
+    experiment_id = expired_draft(fake)
+    fake.fail["purge_delete"] = "after_commit"
+    fake.fail["purge_recheck"] = 500
+    with caplog.at_level(logging.WARNING):
+        assert list_page(client).status_code == 200
+    assert "Logbook purge failed op=recheck" in caplog.text
+    assert experiment_id not in fake.rows and len(fake.objects) == 2  # Orphaned until a sweeper exists.
+    assert fake.by("DELETE", "/storage/") == []
+
+
+def test_list_purges_callers_expired_drafts(client, fake):
+    expired = [expired_draft(fake) for _ in range(2)]
+    other = expired_draft(fake, USER_B)
+    live = fake.add_draft(USER_A)
+    fake.store_objects(live)
+    assert list_page(client).status_code == 200
+    assert all(experiment_id not in fake.rows for experiment_id in expired)
+    assert other in fake.rows and live in fake.rows
+    assert sorted(fake.objects) == sorted(
+        [fake.rows[other]["image_path"], fake.rows[other]["thumb_path"],
+         fake.rows[live]["image_path"], fake.rows[live]["thumb_path"]])
+    (purge,) = [r for r in fake.by("DELETE", "/rest/v1/experiments") if r.url.params["id"].startswith("in.")]
+    assert purge.url.params["user_id"] == f"eq.{USER_A}"
+    assert purge.url.params["status"] == "eq.draft"
+    assert purge.url.params["expires_at"].startswith("lte.")
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_create_purges_expired_drafts(client, fake):
+    experiment_id = expired_draft(fake)
+    assert create(client).status_code == 201
+    assert experiment_id not in fake.rows
+    assert len(fake.objects) == 2  # Only the new experiment's images remain.
+
+
+def test_purge_is_bounded(client, fake):
+    for _ in range(7):
+        expired_draft(fake)
+    list_page(client)
+    (select,) = [r for r in fake.by("GET", "/rest/v1/experiments") if "order" in r.url.params
+                 and r.url.params["order"] == "expires_at.asc"]
+    assert select.url.params["limit"] == "5"
+    assert len(fake.rows) == 2
+
+
+def test_purge_keeps_a_draft_saved_meanwhile(client, fake):
+    experiment_id = expired_draft(fake)
+
+    def save():
+        fake.rows[experiment_id].update(status="saved", title="Kept", saved_at=now().isoformat(), expires_at=None)
+
+    fake.hooks["purge_delete"] = save
+    assert list_page(client).status_code == 200
+    assert fake.rows[experiment_id]["status"] == "saved"
+    assert len(fake.objects) == 2 and fake.by("DELETE", "/storage/") == []
+
+
+@pytest.mark.parametrize("op,label", [("purge_select", "select"), ("purge_delete", "delete"), ("delete", "objects")])
+def test_purge_failure_does_not_affect_list(client, fake, caplog, op, label):
+    experiment_id = expired_draft(fake)
+    fake.fail[op] = 500
+    with caplog.at_level(logging.WARNING):
+        response = list_page(client)
+    assert response.status_code == 200
+    assert f"Logbook purge failed op={label}" in caplog.text
+    assert experiment_id not in caplog.text and USER_A not in caplog.text
+
+
+# --- new routes: auth, limits, logs --------------------------------------------------
+
+
+def test_new_routes_need_bearer(client, fake):
+    experiment_id = uuid.uuid4()
+    assert client.get("/v1/experiments").status_code == 401
+    assert client.patch(f"/v1/experiments/{experiment_id}", json={"title": "x"}).status_code == 401
+    assert client.delete(f"/v1/experiments/{experiment_id}").status_code == 401
+    assert fake.requests == []
+
+
+def test_patch_body_limit(client, fake):
+    use_settings(max_json_body_bytes=100)
+    response = client.patch(f"/v1/experiments/{uuid.uuid4()}", json={"notes": "x" * 200}, headers=auth())
+    assert response.status_code == 413
+    assert fake.requests == []
+
+
+def test_list_patch_delete_never_log_ids_or_urls(client, fake, caplog):
+    experiment_id = fake.add_draft(USER_A, title="Onion")
+    fake.store_objects(experiment_id)
+    with caplog.at_level(logging.DEBUG):
+        page = list_page(client).json()
+        list_page(client, limit=1, cursor=cursor_of(json.dumps({"c": now().isoformat(), "i": experiment_id})))
+        patch(client, experiment_id, {"status": "saved"})
+        delete(client, experiment_id)
+        delete(client, experiment_id)
+    assert page["items"][0]["thumb_url"]
+    for private in (SUPABASE_URL, USER_A, experiment_id, page["items"][0]["thumb_url"], "token="):
+        assert private not in caplog.text
 
 
 # --- display copies ------------------------------------------------------------------
