@@ -6,9 +6,12 @@ user_id=eq.<uid>, and every storage path starts with "<uid>/". Logs carry operat
 and status codes only: never URLs, keys, signed URLs, bodies or user ids.
 """
 
+import base64
 from datetime import datetime, time, timedelta, timezone
+import json
 import logging
 import math
+from time import sleep
 from typing import Any
 import uuid
 
@@ -16,7 +19,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.schemas.experiment import Experiment
+from app.schemas.experiment import Experiment, ExperimentPage, ExperimentSummary, ExperimentUpdate
 from app.services.errors import AnalysisError
 from app.services.gemini import PROMPT_VERSION, analyze_image_with_model
 from app.services.images import make_display_copies, prepare_image
@@ -24,17 +27,32 @@ from app.services.images import make_display_copies, prepare_image
 logger = logging.getLogger(__name__)
 
 SIGNED_URL_SECONDS = 600
-SUPABASE_TIMEOUT_SECONDS = 10
+SUPABASE_TIMEOUT_SECONDS = 10  # Keep above the service_role statement_timeout (5 s, migration 0002).
+CREATE_DEADLINE_SECONDS = SUPABASE_TIMEOUT_SECONDS - 2  # create_draft writes nothing after this.
+# Cleanup waits this long past the deadline, so the database clock may lag this host's by up to
+# about this much (minus the discard call's latency) without a late create slipping through.
+DISCARD_MARGIN_SECONDS = 2
+PURGE_BATCH = 5
+PURGE_GRACE = timedelta(minutes=5)  # Clock-skew margin between this host and the database.
 EXPERIMENT_COLUMNS = (
     "id,user_id,status,title,notes,analysis,created_at,updated_at,saved_at,expires_at,image_path,thumb_path"
+)
+LIST_COLUMNS = (
+    "id,user_id,status,title,created_at,saved_at,expires_at,thumb_path,"
+    "probable_specimen:analysis->>probable_specimen"
 )
 UNAVAILABLE = "Logbook is temporarily unavailable. Please try again."
 NOT_FOUND = "Experiment not found."
 TOO_MANY_DRAFTS = "Too many unsaved drafts. Save or discard one first."
+TOO_MANY_SAVED = "Too many saved experiments. Delete one first."
+TITLE_REQUIRED = "A title is required to save."
+INVALID_CURSOR = "Invalid cursor."
 DAILY_LIMIT = "Daily analysis limit reached for your account. Try again after 00:00 UTC."
 
-# Test hook: tests install an httpx.MockTransport. None uses the real network.
+# Test hooks: tests install an httpx.MockTransport (None uses the real network) and replace
+# _wait so that cleanup does not really sleep.
 _transport: httpx.BaseTransport | None = None
+_wait = sleep
 
 
 class LogbookPathError(ValueError):
@@ -44,8 +62,8 @@ class LogbookPathError(ValueError):
 def _auth_headers(settings: Settings) -> dict[str, str]:
     """Supabase credentials for one request; the only place the secret key is read.
 
-    Assumes new-style secret keys are accepted in the apikey header alone. Not yet
-    verified against a real project; change it here if Supabase needs more.
+    New-style secret keys are accepted in the apikey header alone (verified live against
+    the project on 2026-10-11, PostgREST and Storage).
     """
     return {"apikey": settings.supabase_secret_key.get_secret_value().strip()}
 
@@ -86,6 +104,24 @@ def _check_paths(user_id: str, paths: list[str]) -> None:
             raise LogbookPathError("Storage path is outside the user's prefix.")
 
 
+def _canonical_id(experiment_id: object) -> str | None:
+    """The canonical UUID string, or None if experiment_id is not a UUID."""
+    try:
+        return str(uuid.UUID(experiment_id))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _object_paths(user_id: str, experiment_id: str) -> list[str]:
+    """Where create_experiment stores an experiment's images."""
+    return [f"{user_id}/{experiment_id}/image.jpg", f"{user_id}/{experiment_id}/thumb.jpg"]
+
+
+def _utc_timestamp(value: datetime) -> str:
+    """UTC ISO 8601 with a Z suffix, so query values never contain "+"."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def count_live_drafts(user_id: str, settings: Settings) -> int:
     now = datetime.now(timezone.utc).isoformat()
     rows = _json(_request("count_drafts", settings, "GET", "/rest/v1/experiments", params={
@@ -121,41 +157,73 @@ def delete_objects(user_id: str, paths: list[str], settings: Settings) -> None:
 
 
 def insert_experiment(user_id: str, row: dict[str, Any], settings: Settings) -> Any:
-    """Insert one row owned by user_id and return the decoded representation (None if undecodable)."""
-    response = _request("insert", settings, "POST", "/rest/v1/experiments",
-                        params={"select": EXPERIMENT_COLUMNS},
-                        json={**row, "user_id": user_id},
-                        headers={"Prefer": "return=representation"})
+    """Create a draft owned by user_id through create_draft (migration 0002).
+
+    The function enforces the draft cap under a per-user lock, sets expires_at, and writes
+    nothing once row["deadline"] has passed. Returns the decoded result: {"result": "ok",
+    "row": {...}}, or "draft_limit", "late" or "invalid_arguments" with nothing written;
+    anything else (None if undecodable) is a bad response.
+    """
+    response = _request("insert", settings, "POST", "/rest/v1/rpc/create_draft", json={
+        "p_user": user_id,
+        "p_id": row["id"],
+        "p_max_drafts": settings.max_drafts_per_user,
+        "p_ttl_hours": settings.draft_ttl_hours,
+        "p_deadline": _utc_timestamp(row["deadline"]),
+        "p_analysis": row["analysis"],
+        "p_model": row["model"],
+        "p_prompt_version": row["prompt_version"],
+        "p_image_path": row["image_path"],
+        "p_thumb_path": row["thumb_path"],
+        "p_image_bytes": row["image_bytes"],
+    })
     return _json(response)
 
 
-def delete_experiment_row(user_id: str, experiment_id: str, settings: Settings) -> None:
-    """Delete one row owned by user_id. Idempotent: a row that does not exist is not an error.
+def discard_draft(user_id: str, experiment_id: str, settings: Settings) -> bool:
+    """Delete the user's draft through discard_draft (migration 0002); True if a row was removed.
 
-    An empty user_id or a non-UUID experiment_id is refused before any request.
+    The function takes the same per-user lock as create_draft, so a create still running
+    finishes first. An empty user_id or a non-UUID experiment_id is refused before any request.
     """
     if not user_id:
         raise ValueError("user_id is required.")
+    canonical = _canonical_id(experiment_id)
+    if canonical is None:
+        raise ValueError("experiment_id must be a UUID.")
+    removed = _json(_request("discard_draft", settings, "POST", "/rest/v1/rpc/discard_draft",
+                             json={"p_user": user_id, "p_id": canonical}))
+    if not isinstance(removed, bool):
+        raise _unavailable("discard_draft", "bad_response")
+    return removed
+
+
+def _owns(user_id: str, row: Any, path_keys: tuple[str, ...]) -> bool:
+    """True if row belongs to user_id and each named storage path passes _check_paths."""
+    if not isinstance(row, dict) or row.get("user_id") != user_id:
+        return False
+    paths = [row.get(key) for key in path_keys]
+    if not all(isinstance(path, str) for path in paths):
+        return False
     try:
-        canonical = str(uuid.UUID(experiment_id))
-    except (TypeError, ValueError, AttributeError):
-        raise ValueError("experiment_id must be a UUID.") from None
-    _request("delete_row", settings, "DELETE", "/rest/v1/experiments",
-             params={"id": f"eq.{canonical}", "user_id": f"eq.{user_id}"},
-             headers={"Prefer": "return=minimal"})
+        _check_paths(user_id, paths)
+    except LogbookPathError:
+        return False
+    return True
 
 
 def _owned_row(user_id: str, rows: Any) -> dict[str, Any] | None:
     """The single row if it belongs to user_id and its storage paths sit under the user's prefix."""
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+    if not isinstance(rows, list) or len(rows) != 1:
         return None
-    row = rows[0]
-    prefix = f"{user_id}/"
-    if row.get("user_id") != user_id or not all(
-        isinstance(row.get(key), str) and row[key].startswith(prefix) for key in ("image_path", "thumb_path")
-    ):
+    return rows[0] if _owns(user_id, rows[0], ("image_path", "thumb_path")) else None
+
+
+def _rpc_row(user_id: str, result: Any) -> dict[str, Any] | None:
+    """The owned row from an RPC result {"result": "ok", "row": {...}}, else None."""
+    if not isinstance(result, dict) or result.get("result") != "ok":
         return None
-    return row
+    return _owned_row(user_id, [result.get("row")])
 
 
 def get_experiment(user_id: str, experiment_id: str, settings: Settings) -> dict[str, Any] | None:
@@ -177,7 +245,7 @@ def get_experiment(user_id: str, experiment_id: str, settings: Settings) -> dict
         except (KeyError, TypeError, ValueError):
             raise _unavailable("get_experiment", "bad_response") from None
         if expired:
-            return None  # Lazy deletion of expired drafts arrives in PR 4.
+            return None  # Expired drafts are deleted lazily by purge_expired_drafts.
     return row
 
 
@@ -221,10 +289,16 @@ def _cleanup(user_id: str, paths: list[str], settings: Settings, op: str) -> Non
         logger.warning("Logbook cleanup failed op=%s objects=%s", op, len(paths))
 
 
-def _delete_row_quietly(user_id: str, experiment_id: str, settings: Settings) -> bool:
-    """Best effort after a failed insert: True if the row is gone (or was never stored)."""
+def _discard_quietly(user_id: str, experiment_id: str, deadline: datetime, settings: Settings) -> bool:
+    """Best effort after a failed insert: True if the row is gone (or was never stored).
+
+    Waits until DISCARD_MARGIN_SECONDS past the create deadline first: a create_draft call still
+    queued then returns "late" without writing, and one already running holds the lock that
+    discard_draft waits for. Costs up to about 10 s, holding this worker, on this rare failure path.
+    """
     try:
-        delete_experiment_row(user_id, experiment_id, settings)
+        _wait(max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds()) + DISCARD_MARGIN_SECONDS)
+        discard_draft(user_id, experiment_id, settings)
     except Exception:
         logger.warning("Logbook cleanup failed op=row")
         return False
@@ -237,9 +311,11 @@ def create_experiment(user_id: str, data: bytes, content_type: str | None, setti
     Order: draft cap, image validation, display copies, quota, Gemini, uploads, insert.
     A rejected image, or one whose display copies cannot be made (busy, too large),
     costs no quota. If Gemini fails, nothing is stored. If an upload fails, the objects
-    already uploaded are deleted. If the insert fails, the row is deleted first (the
-    insert may have committed before its response was lost), then the objects; if the
-    row delete fails, the objects are kept so a surviving row never loses its images.
+    already uploaded are deleted. create_draft writes nothing after a deadline 8 s out. If
+    the insert fails, cleanup waits for that deadline, removes the row with discard_draft
+    (the insert may have committed before its response was lost), then the objects; if
+    the discard fails, the objects are kept so a surviving row never loses its images.
+    A draft_limit, late or invalid_arguments result means no row, so only objects go.
     """
     if count_live_drafts(user_id, settings) >= settings.max_drafts_per_user:
         raise AnalysisError(409, TOO_MANY_DRAFTS)
@@ -251,8 +327,7 @@ def create_experiment(user_id: str, data: bytes, content_type: str | None, setti
     analysis, model = analyze_image_with_model(cleaned, mime_type, settings)
 
     experiment_id = str(uuid.uuid4())
-    image_path = f"{user_id}/{experiment_id}/image.jpg"
-    thumb_path = f"{user_id}/{experiment_id}/thumb.jpg"
+    image_path, thumb_path = _object_paths(user_id, experiment_id)
     uploaded: list[str] = []
     stage = "upload"
     try:
@@ -261,28 +336,36 @@ def create_experiment(user_id: str, data: bytes, content_type: str | None, setti
             uploaded.append(path)
             upload_object(user_id, path, content, settings)
         stage = "insert"
-        rows = insert_experiment(user_id, {
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=CREATE_DEADLINE_SECONDS)
+        result = insert_experiment(user_id, {
             "id": experiment_id,
-            "status": "draft",
             "analysis": analysis.model_dump(),
             "model": model,
             "prompt_version": PROMPT_VERSION,
             "image_path": image_path,
             "thumb_path": thumb_path,
             "image_bytes": len(display),
-            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=settings.draft_ttl_hours)).isoformat(),
+            "deadline": deadline,
         }, settings)
+        outcome = result.get("result") if isinstance(result, dict) else None
+        if outcome in ("draft_limit", "late", "invalid_arguments"):
+            # create_draft wrote nothing (draft_limit: a concurrent create took the last slot
+            # after the pre-check), so only the images need deleting, with no discard.
+            stage = outcome
+            if outcome == "draft_limit":
+                raise AnalysisError(409, TOO_MANY_DRAFTS)
+            raise _unavailable("insert", outcome)
     except Exception:
         # Delete what may have been stored, then re-raise unchanged. After an insert failure the
-        # row may exist anyway (committed, response lost): delete it first, and keep the
+        # row may exist anyway (committed, response lost): discard it first, and keep the
         # objects if that fails, so a surviving row never points at missing images.
-        if stage == "insert" and not _delete_row_quietly(user_id, experiment_id, settings):
+        if stage == "insert" and not _discard_quietly(user_id, experiment_id, deadline, settings):
             raise
         if uploaded:
             _cleanup(user_id, uploaded, settings, stage)
         raise
     # The row exists from here on, so a bad representation is reported but the objects stay.
-    row = _owned_row(user_id, rows)
+    row = _rpc_row(user_id, result)
     if row is None:
         raise _unavailable("insert", "bad_response")
     return _experiment(user_id, row, settings)
@@ -290,11 +373,167 @@ def create_experiment(user_id: str, data: bytes, content_type: str | None, setti
 
 def read_experiment(user_id: str, experiment_id: str, settings: Settings) -> Experiment:
     """The user's own experiment, or 404. Another user's ID also gives 404, never 403."""
-    try:
-        canonical = str(uuid.UUID(experiment_id))
-    except ValueError:
-        raise AnalysisError(404, NOT_FOUND) from None
+    canonical = _canonical_id(experiment_id)
+    if canonical is None:
+        raise AnalysisError(404, NOT_FOUND)
     row = get_experiment(user_id, canonical, settings)
     if row is None:
         raise AnalysisError(404, NOT_FOUND)
     return _experiment(user_id, row, settings)
+
+
+def _encode_cursor(created_at: datetime, experiment_id: str) -> str:
+    raw = json.dumps({"c": _utc_timestamp(created_at), "i": experiment_id}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[str, str] | None:
+    """(created_at as a UTC Z timestamp, canonical id) from a cursor, or None if it is malformed."""
+    try:
+        data = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        created_at = datetime.fromisoformat(data["c"])
+        experiment_id = _canonical_id(data["i"])
+        if experiment_id is None or created_at.tzinfo is None or not 2020 <= created_at.year <= 9998:
+            return None
+        return _utc_timestamp(created_at), experiment_id
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return None
+
+
+def list_experiments(user_id: str, limit: int, cursor: str | None, settings: Settings) -> ExperimentPage:
+    """The user's saved experiments and live drafts, newest first, with signed thumbnail URLs only.
+
+    Keyset paging on (created_at, id). A malformed cursor is a 400 before any request.
+    """
+    position = None
+    if cursor is not None:
+        position = _decode_cursor(cursor)
+        if position is None:
+            raise AnalysisError(400, INVALID_CURSOR)
+    # Values inside PostgREST logic trees are quoted: timestamps contain the reserved "." and ":".
+    conditions = f'or(status.eq.saved,expires_at.gt."{_utc_timestamp(datetime.now(timezone.utc))}")'
+    if position is not None:
+        created_at, after_id = position
+        conditions += f',or(created_at.lt."{created_at}",and(created_at.eq."{created_at}",id.lt.{after_id}))'
+    rows = _json(_request("list", settings, "GET", "/rest/v1/experiments", params={
+        "select": LIST_COLUMNS,
+        "user_id": f"eq.{user_id}",
+        "and": f"({conditions})",
+        "order": "created_at.desc,id.desc",
+        "limit": str(limit + 1),
+    }))
+    if not isinstance(rows, list) or len(rows) > limit + 1 \
+            or not all(_owns(user_id, row, ("thumb_path",)) for row in rows):
+        raise _unavailable("list", "bad_response")
+    page = rows[:limit]
+    thumbs = sign_urls(user_id, [row["thumb_path"] for row in page], settings) if page else []
+    try:
+        items = [ExperimentSummary.model_validate({**row, "thumb_url": thumb}) for row, thumb in zip(page, thumbs)]
+    except ValidationError:
+        raise _unavailable("list", "bad_response") from None
+    next_cursor = _encode_cursor(items[-1].created_at, items[-1].id) if len(rows) > limit else None
+    return ExperimentPage(items=items, next_cursor=next_cursor, thumb_url_expires_in=SIGNED_URL_SECONDS)
+
+
+def update_experiment(user_id: str, experiment_id: str, update: ExperimentUpdate,
+                      settings: Settings) -> Experiment:
+    """Edit title/notes and optionally save a draft, through update_experiment (migration 0002).
+
+    The function enforces the saved cap under the same per-user lock as create.
+    """
+    canonical = _canonical_id(experiment_id)
+    if canonical is None:
+        raise AnalysisError(404, NOT_FOUND)
+    result = _json(_request("update", settings, "POST", "/rest/v1/rpc/update_experiment", json={
+        "p_user": user_id,
+        "p_id": canonical,
+        "p_title": update.title,
+        "p_notes": update.notes,
+        "p_save": update.status == "saved",
+        "p_max_saved": settings.max_saved_experiments_per_user,
+    }))
+    outcome = result.get("result") if isinstance(result, dict) else None
+    if outcome == "not_found":
+        raise AnalysisError(404, NOT_FOUND)
+    if outcome == "title_required":
+        raise AnalysisError(422, TITLE_REQUIRED)
+    if outcome == "saved_limit":
+        raise AnalysisError(409, TOO_MANY_SAVED)
+    row = _rpc_row(user_id, result)
+    if row is None or row.get("id") != canonical:
+        raise _unavailable("update", "bad_response")
+    return _experiment(user_id, row, settings)
+
+
+def delete_experiment(user_id: str, experiment_id: str, settings: Settings) -> None:
+    """Delete the user's experiment: the row first, then its images. 404 if there was no row.
+
+    The image delete also runs after a 404, so retrying a delete whose image cleanup failed
+    removes the leftovers; it only reaches the caller's own <user_id>/<id>/ prefix. If the
+    row delete fails or its response is unclear, the images are kept.
+    """
+    canonical = _canonical_id(experiment_id)
+    if canonical is None:
+        raise AnalysisError(404, NOT_FOUND)
+    rows = _json(_request("delete", settings, "DELETE", "/rest/v1/experiments",
+                          params={"select": "id", "id": f"eq.{canonical}", "user_id": f"eq.{user_id}"},
+                          headers={"Prefer": "return=representation"}))
+    if not isinstance(rows, list) or len(rows) > 1 \
+            or any(not isinstance(row, dict) or row.get("id") != canonical for row in rows):
+        raise _unavailable("delete", "bad_response")
+    _cleanup(user_id, _object_paths(user_id, canonical), settings, "delete")
+    if not rows:
+        raise AnalysisError(404, NOT_FOUND)
+
+
+def _ids(rows: Any) -> list[str]:
+    """Canonical ids from [{"id": ...}, ...]; ValueError on anything else."""
+    if not isinstance(rows, list):
+        raise ValueError("bad_response")
+    ids = [_canonical_id(row.get("id")) if isinstance(row, dict) else None for row in rows]
+    if None in ids:
+        raise ValueError("bad_response")
+    return ids
+
+
+def purge_expired_drafts(user_id: str, settings: Settings) -> None:
+    """Delete up to PURGE_BATCH of the user's expired drafts and their images. Never raises.
+
+    Best effort, run after the response. Only drafts expired for PURGE_GRACE are taken, so a
+    clock ahead of the database's cannot purge a draft the database still counts as live.
+    The delete repeats the draft and expiry filters, so a draft saved in the meantime is kept,
+    and images are deleted only for rows it removed.
+    """
+    op = "select"
+    try:
+        expired = {
+            "user_id": f"eq.{user_id}",
+            "status": "eq.draft",
+            "expires_at": f"lte.{_utc_timestamp(datetime.now(timezone.utc) - PURGE_GRACE)}",
+        }
+        ids = _ids(_json(_request("purge_select", settings, "GET", "/rest/v1/experiments", params={
+            "select": "id", **expired, "order": "expires_at.asc", "limit": str(PURGE_BATCH),
+        })))[:PURGE_BATCH]
+        if not ids:
+            return
+        op = "delete"
+        try:
+            deleted = _ids(_json(_request("purge_delete", settings, "DELETE", "/rest/v1/experiments",
+                                          params={"select": "id", "id": f"in.({','.join(ids)})", **expired},
+                                          headers={"Prefer": "return=representation"})))
+        except Exception:
+            # The delete may have committed with its response lost. Rows now gone were the only
+            # reference to their images, so find them and delete their images below.
+            logger.warning("Logbook purge failed op=delete")
+            op = "recheck"
+            present = set(_ids(_json(_request("purge_recheck", settings, "GET", "/rest/v1/experiments", params={
+                "select": "id", "user_id": f"eq.{user_id}", "id": f"in.({','.join(ids)})",
+            }))))
+            deleted = [experiment_id for experiment_id in ids if experiment_id not in present]
+        op = "objects"
+        paths = [path for experiment_id in deleted if experiment_id in ids
+                 for path in _object_paths(user_id, experiment_id)]
+        if paths:
+            delete_objects(user_id, paths, settings)
+    except Exception:
+        logger.warning("Logbook purge failed op=%s", op)
