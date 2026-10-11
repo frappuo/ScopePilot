@@ -54,8 +54,7 @@ live in `docs/HANDOFF.md`.
   keyboard scrolling was not separately reported.
 - Not verified: Gemini's handling of 16-bit PNG; memory use on Render.
 - Documentation synced to the code. `architecture.md` and `project_context.md`
-  were merged into `docs/HANDOFF.md` and removed; `agents.md` now points to
-  `CLAUDE.md`.
+  were merged into `docs/HANDOFF.md` and removed.
 
 ## Educational Quiz Verification (2026-09-08)
 

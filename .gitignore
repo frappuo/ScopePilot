@@ -12,10 +12,6 @@ node_modules/
 # Office lock files
 ~$*
 
-# Claude Code local
-.claude/settings.local.json
-CLAUDE.local.md
-
 # Personal test photos
 backend/evals/images/IMG_*
 *.MOV

@@ -1,6 +1,6 @@
 # ScopePilot --- Product and Architecture Handoff
 
-**Purpose:** Context handoff for Claude covering the product, architecture, implementation, design decisions, evaluation, known limitations, and next steps. This is a status summary; inspect the repository for exact current code behavior. `CLAUDE.md` holds the working rules.
+**Purpose:** Context handoff covering the product, architecture, implementation, design decisions, evaluation, known limitations, and next steps. This is a status summary that may lag behind later changes; the repository is the source of truth for exact current code behavior.
 
 -   **Official title:** ScopePilot: An AI-Assisted Microscopy Observation System Using Vision Language Models
 -   **Course:** BCSE497J Project-I
@@ -49,7 +49,7 @@ Do not describe planned features as implemented.
 
 ### Planned / not implemented
 
-None of the following exists in the code. Remaining logbook PRs, in order (mirrors `CLAUDE.md`):
+None of the following exists in the code. Remaining logbook PRs, in order:
 
 -   PR 5: experiment-scoped `/ask` and `/quiz` (`experiment_id` instead of a client-supplied analysis), charging the same per-user daily quota that create already uses since PR 3. Today both accept the full analysis supplied by the client (`AskRequest.analysis`, `QuizRequest.analysis` in `backend/app/schemas/`).
 -   PR 6: account deletion.
@@ -261,7 +261,7 @@ Defensible explanation: "I compared four prompt variants on the same five cases 
 
 > ScopePilot is an evaluation-driven multimodal educational system. Its engineering contribution is integrating a pretrained VLM into a mobile-to-backend workflow, validating inputs and structured outputs, supporting context-aware learning interactions, and experimentally studying prompt-induced reliability trade-offs. It does not claim a novel neural architecture or clinical-grade microscopy accuracy.
 
-Without Gemini the product loses its inference engine, but the mobile workflow, API boundary, validation, structured contract, learning interactions, and evaluation harness remain. Claims to avoid are listed under "Honesty rules" in `CLAUDE.md`.
+Without Gemini the product loses its inference engine, but the mobile workflow, API boundary, validation, structured contract, learning interactions, and evaluation harness remain. Avoid claiming: a novel neural architecture, hallucination-free output, guaranteed identification, prompt-injection immunity, that RAG verifies visual evidence, that lexical matching is biological accuracy, that schema validity or 100% recall means correctness, or that five images show general performance.
 
 ## 11. Useful commands
 
@@ -298,7 +298,3 @@ Eval dependencies: `braintrust==0.37.0`, `autoevals==0.1.0`, `openai==1.109.1`; 
 7.  Implement and separately evaluate RAG.
 8.  Evaluate educational usability with students/instructors.
 9.  Keep experimental prompt changes isolated from the production prompt.
-
-## 13. Instructions for Claude Code
-
-Treat the repository as the source of truth; this handoff may lag behind later changes. `CLAUDE.md` holds the working rules (plan first, focused changes, honest test reports, implemented vs planned, the name **ScopePilot**, educational non-diagnostic scope).
