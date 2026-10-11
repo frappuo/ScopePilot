@@ -1,82 +1,36 @@
 # ScopePilot --- Product and Architecture Handoff
 
-**Purpose:** Context handoff for Claude covering the product,
-architecture, implementation, design decisions, evaluation, known
-limitations, and next steps. This is a status summary; inspect the
-repository for exact current code behavior.
+**Purpose:** Context handoff for Claude covering the product, architecture, implementation, design decisions, evaluation, known limitations, and next steps. This is a status summary; inspect the repository for exact current code behavior. `CLAUDE.md` holds the working rules.
 
--   **Official title:** ScopePilot: An AI-Assisted Microscopy
-    Observation System Using Vision Language Models
+-   **Official title:** ScopePilot: An AI-Assisted Microscopy Observation System Using Vision Language Models
 -   **Course:** BCSE497J Project-I
 -   **Repository:** https://github.com/frappuo/ScopePilot
--   **Public backend:** https://scopepilot.onrender.com (per handoff;
-    the repository contains no Render configuration)
+-   **Public backend:** https://scopepilot.onrender.com (per handoff; the repository contains no Render configuration)
 -   **Domain:** Educational microscopy only; not a diagnostic system.
 
 ## 1. Product summary
 
-ScopePilot augments a conventional microscope with a smartphone
-application and a backend-connected Vision-Language Model (VLM). A
-student captures or uploads a microscope image. The mobile app sends it
-to a FastAPI backend, which validates the upload and calls Gemini. The
-result is returned as structured educational analysis: probable
-specimen, visible structures, observations, explanation, and
-limitations. The same context supports follow-up questions and quiz
-generation.
+ScopePilot augments a conventional microscope with a smartphone app and a backend-connected Vision-Language Model (VLM). A student uploads a microscope image; the FastAPI backend validates it and calls Gemini, and returns a structured educational analysis (probable specimen, visible structures, observations, explanation, limitations) that also drives follow-up questions and a quiz. The goal is to help students interpret what they see without an expensive digital microscope or local ML hardware.
 
-The goal is to help students interpret and learn from microscopy
-observations without requiring an expensive digital microscope or local
-ML hardware. The AI is assistive and tentative; the student remains
-responsible for verifying the output through direct observation and
-trusted materials. ScopePilot does not diagnose disease or replace
-expert judgment.
+The AI is assistive and tentative; the student remains responsible for verifying the output through direct observation and trusted materials. ScopePilot does not diagnose disease or replace expert judgment.
 
-**Problem addressed:** students using microscopes often have difficulty
-identifying specimens, recognizing visible biological structures,
-understanding what they observe, and getting immediate guidance during
-laboratory work. A conventional microscope gives visual access to a
-specimen but no interactive educational assistance. ScopePilot augments
-the existing optical microscope rather than replacing it.
-
-**Longer-term ideas (not planned for the current prototype, not
-implemented):** image history, comparison between microscope images, a
-custom microscopy VLM, Soup-based fine-tuning, classifier/reliability
-models, advanced uncertainty calibration, and real-time microscope
-video.
+**Longer-term ideas (not planned for the current prototype, not implemented):** image comparison, a custom microscopy VLM, Soup-based fine-tuning, classifier/reliability models, uncertainty calibration, and real-time microscope video.
 
 ## 2. Current status
 
 ### Implemented
 
--   React Native/Expo mobile application (gallery selection only; no
-    camera capture).
--   Image upload of the original file; backend validation and
-    re-encoding (see section 5).
--   FastAPI backend and Gemini VLM integration.
--   Structured microscopy analysis response.
--   Follow-up Q&A (`/ask`).
--   Quiz generation (`/quiz`): exactly three questions, four options
-    each.
--   Backend error handling; the app shows the backend's `detail` for
-    400/413/415 only.
--   Braintrust prompt-evaluation harness with four variants and
-    deterministic scorers.
--   Optional Gemini model fallback on quota or model-not-found
-    (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model
-    (sections 5 and 8).
--   Request limits: body-size limits, input caps on the analysis sent to
-    `/ask` and `/quiz`, and a global daily Gemini cap (section 5).
--   Optional shared app token (`APP_TOKEN` / `X-ScopePilot-Token`); a
-    deterrent, not authentication (section 5).
--   Tests at the last run (2026-10-04): backend 190 passed; frontend 41
-    passed.
+-   React Native/Expo app (gallery selection only; no camera capture): analysis, follow-up Q&A (`/ask`), quiz (`/quiz`: exactly three questions, four options each).
+-   FastAPI backend with Gemini; upload validation and re-encoding (section 5); structured, Pydantic-validated responses; the app shows the backend's `detail` for 400/413/415 only.
+-   Optional Gemini model fallback on quota or model-not-found (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model.
+-   Request limits (body size, `/ask`/`/quiz` input caps, global daily Gemini cap) and an optional shared app token (`APP_TOKEN`; a deterrent, not authentication).
+-   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete; section 5). No login or logbook screens in the app yet.
+-   Braintrust prompt-evaluation harness with four variants and deterministic scorers.
 
 ### Verified on a physical device (user-reported)
 
--   2026-10-03: analysis, Q&A, quiz, Live Photos, and PNG uploads
-    verified on a physical iPhone against the deployed Render backend.
--   Render deployment at `https://scopepilot.onrender.com`: per
-    handoff and user report; not verifiable from the repository.
+-   2026-10-03: analysis, Q&A, quiz, Live Photos, and PNG uploads verified on a physical iPhone against the deployed Render backend.
+-   Render deployment at `https://scopepilot.onrender.com`: per handoff and user report; not verifiable from the repository.
 
 ### Incomplete or not verified
 
@@ -95,968 +49,256 @@ Do not describe planned features as implemented.
 
 ### Planned / not implemented
 
-None of the following exists in the code. Authentication and
-database-backed accounts are currently deferred.
+None of the following exists in the code. Remaining logbook PRs, in order (mirrors `CLAUDE.md`):
 
--   User accounts and login.
--   Saved experiment logs: list, open, rename, delete.
--   Server-side storage of analyses, so that `/ask` and `/quiz` take an
-    `experiment_id`. Today both accept the full analysis supplied by
-    the client (`AskRequest.analysis`, `QuizRequest.analysis` in
-    `backend/app/schemas/`).
--   Per-user rate limiting on `/analyze`, `/ask` and `/quiz`. Today they
-    have only a global, per-process daily Gemini cap
-    (`GEMINI_DAILY_CALL_LIMIT`) and the mapping of a Gemini 429 to a
-    503. The per-user daily quota applies only to `POST
-    /v1/experiments` (section 5, Student logbook).
--   Later assistant features: context across experiments and learning
-    tracking.
+-   PR 5: experiment-scoped `/ask` and `/quiz` (`experiment_id` instead of a client-supplied analysis), charging the same per-user daily quota that create already uses since PR 3. Today both accept the full analysis supplied by the client (`AskRequest.analysis`, `QuizRequest.analysis` in `backend/app/schemas/`).
+-   PR 6: account deletion.
+-   PR 7: legacy switch.
+-   Then the frontend login and experiments screens (no login in the app today).
+-   Later assistant features: cross-experiment context, learning tracking.
 -   RAG over trusted biology material.
+
+Also not implemented: per-user rate limiting on `/analyze`, `/ask` and `/quiz`. Today they have only a global, per-process daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`) and the mapping of a Gemini 429 to a 503. The per-user daily quota applies only to `POST /v1/experiments`.
 
 ### Known issues / follow-up tasks
 
--   CORS is intentionally off (section 5), so the browser preview cannot
-    call the backend.
--   No authentication or per-user rate limiting on the public API (body
-    limits, input caps, a global daily cap, and an optional shared app
-    token exist).
+-   CORS is intentionally off, so the browser preview cannot call the backend.
+-   No authentication or per-user rate limiting on the legacy API (body limits, input caps, a global daily cap, and an optional shared app token exist).
 -   `/ask` and `/quiz` trust the client-supplied analysis.
--   Reconcile eval variant names: the code uses
-    `prompt-a-naive-baseline`, `prompt-b-scopepilot-production`,
-    `prompt-c-overconstrained`, `prompt-d-synthesized`, which differ
-    from the names in section 8. `prompt-a-naive-baseline` actually
-    sends the unchanged production prompt, and
-    `prompt-b-scopepilot-production` is the production prompt plus
-    extra instructions.
+-   Reconcile eval variant names (section 8).
 -   Gemini's handling of 16-bit grayscale PNG is untested.
--   The code default `GEMINI_MODEL` (`gemini-2.5-flash`) differs from
-    `backend/.env.example` (`gemini-3.1-flash-lite`) and was recorded
-    as unavailable to new users (`progress.md`).
+-   The code default `GEMINI_MODEL` (`gemini-2.5-flash`) differs from `backend/.env.example` (`gemini-3.1-flash-lite`) and was recorded as unavailable to new users (`progress.md`).
 -   `backend/.env.example` does not list `MAX_ENCODED_IMAGE_BYTES`.
--   A "server busy" 503 shows the app's generic 503 message, not the
-    backend detail.
--   Real-device behavior of the decode lock and memory use on Render
-    have not been measured.
+-   A "server busy" 503 shows the app's generic 503 message, not the backend detail.
+-   Real-device behavior of the decode lock and memory use on Render have not been measured.
 
 ## 3. Architecture
 
-``` text
-Conventional microscope
-        |
-Smartphone camera / image picker
-        |
-React Native + Expo app
-        |
-HTTP multipart image upload
-        |
-FastAPI backend
-        |
-Image/file validation
-        |
-Gemini VLM service
-        |
-Structured Analysis response
-        |
-Pydantic/schema validation
-        |
-JSON response to app
-        |
-Analysis UI
-   |             |
-Follow-up Q&A   Quiz generation
-        |
-Student verifies output
-```
+Microscope → phone image picker → Expo app → multipart upload → FastAPI (validation, re-encode) → Gemini → Pydantic-validated `Analysis` → app (analysis, follow-up Q&A, quiz) → the student verifies the output.
 
-Planned RAG extension:
+Planned RAG: trusted material → chunks → embeddings → vector retrieval → grounded explanation. RAG can ground biological explanations in sources; it cannot prove that a structure is actually visible in the submitted image. Visual interpretation, factual grounding, and human verification are distinct responsibilities.
 
-``` text
-Trusted biology material
-        |
-Extract and chunk documents
-        |
-Generate embeddings
-        |
-Vector store / similarity retrieval
-        |
-Relevant passages + analysis context
-        |
-Generation of grounded educational explanation
-```
+-   **Frontend:** UI, image selection, API requests, loading/error/success states. Never calls Gemini.
+-   **Backend:** API boundary, upload validation, prompts, model orchestration, response validation, error handling, provider credentials.
+-   **Gemini:** pretrained, replaceable multimodal inference; not assumed accurate or calibrated.
+-   **Braintrust:** experiment tracking and evaluation, not the inference model or product database.
 
-RAG can ground biological explanations in sources; it cannot prove that
-a structure is actually visible in the submitted image. Visual
-interpretation, factual grounding, and human verification are distinct
-responsibilities.
+## 4. Design rationale
 
-### Component responsibilities
-
-**Frontend:** UI, gallery image selection (camera capture is not
-implemented), API requests,
-loading/error/success states, and display of analysis/Q&A/quiz. It does
-not call Gemini directly.
-
-**Backend:** API boundary, upload validation, model orchestration,
-prompt handling, structured response validation, Q&A/quiz processing,
-error handling, and provider credentials.
-
-**Gemini:** pretrained multimodal inference component. It receives image
-data and instructions and generates text. It is not assumed to be
-perfectly accurate or calibrated and is replaceable in principle.
-
-**Braintrust:** experiment tracking and evaluation, not the inference
-model or product database.
-
-## 4. Technology choices
-
-  -----------------------------------------------------------------------
-  Choice                              Purpose and rationale
-  ----------------------------------- -----------------------------------
-  React Native                        Cross-platform mobile application
-                                      with a shared codebase.
-
-  Expo                                Simplifies React Native
-                                      development, device testing, and
-                                      mobile integrations.
-
-  TypeScript                          Helps catch frontend type and
-                                      data-shape errors; verify exact
-                                      repository usage before discussing
-                                      particular files.
-
-  Python                              Practical ecosystem for AI
-                                      integration, validation, and
-                                      evaluation.
-
-  FastAPI                             Python REST API, typed request
-                                      handling, automatic OpenAPI/Swagger
-                                      docs, and straightforward
-                                      AI-service integration.
-
-  Pydantic                            Typed schemas and validation for
-                                      predictable API/model output.
-
-  Gemini VLM                          Image-plus-text understanding and
-                                      natural-language explanation
-                                      without training a custom model.
-
-  Braintrust                          Controlled comparison of prompt
-                                      variants and recorded evaluation
-                                      results.
-
-  Render                              Public HTTPS hosting for the
-                                      backend.
-
-  ChromaDB/embeddings                 Planned RAG direction; not in the
-                                      code or requirements.
-  -----------------------------------------------------------------------
-
-### Why a VLM rather than a conventional classifier?
-
-A classifier usually returns a label. ScopePilot needs a richer
-interaction: likely specimen, structures, observations, educational
-explanation, limitations, follow-up answers, and quiz questions. A VLM
-is a practical fit for this natural-language multimodal workflow, though
-it is not automatically more reliable than specialist CV models.
-
-### Why not train a model?
-
-The project's present focus is integrating and evaluating a pretrained
-VLM. Training a microscopy foundation model would require substantial
-expert-labelled data and compute. The project does not claim a novel
-neural architecture. Specialist models such as segmentation systems
-could be considered later if localization or task-specific accuracy
-becomes necessary.
-
-### Why keep Gemini behind the backend?
-
-It keeps the API key out of the mobile app, centralizes prompts and
-validation, enables controlled error handling and evaluation, and makes
-the client less dependent on a particular model provider.
+-   **VLM rather than a classifier:** ScopePilot needs specimen, structures, observations, explanation, limitations, Q&A and quizzes, not a label. A VLM fits this workflow but is not automatically more reliable than specialist CV models.
+-   **No custom training:** a microscopy foundation model would need substantial expert-labelled data and compute. The project does not claim a novel architecture; specialist models (e.g. segmentation) could come later.
+-   **Gemini behind the backend:** keeps the API key out of the app, centralizes prompts and validation, and keeps the client provider-independent.
 
 ## 5. Backend
 
-Structure:
-
-``` text
-backend/
-  app/
-    config.py            Settings (env / backend/.env)
-    main.py              app, routers, AnalysisError handler
-    routes/              analyze.py, ask.py, quiz.py, health.py
-    schemas/             analysis.py, ask.py, quiz.py, health.py
-    services/            gemini.py, images.py, errors.py
-  evals/
-    microscopy_eval.py
-    images/
-  tests/
-```
-
-Routes handle HTTP communication, schemas define data contracts, and
-services contain model/application logic.
+Layout: `routes/` = HTTP only, `schemas/` = Pydantic, `services/` = Gemini and business logic (`gemini.py`, `images.py`, `logbook.py`, `auth.py`), `config.py` = env, `middleware.py` = app token and body limits.
 
 ### Endpoints
 
-  -----------------------------------------------------------------------
-  Endpoint                Method                  Purpose
-  ----------------------- ----------------------- -----------------------
-  `/health`               GET                     Server
-                                                  health/connectivity
-                                                  check.
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/health` | GET | Health check. |
+| `/analyze` | POST | Validate an image, call Gemini, return structured analysis. |
+| `/ask` | POST | Answer a follow-up using the analysis context. |
+| `/quiz` | POST | Generate quiz questions from the analysis context. |
+| `/v1/me` | GET | The signed-in user (Supabase token). |
+| `/v1/experiments` | POST, GET | Create a draft from an image; list own saved experiments and live drafts (PR 4 branch). |
+| `/v1/experiments/{id}` | GET, PATCH, DELETE | Read, edit/save (PATCH and DELETE on the PR 4 branch). |
 
-  `/analyze`              POST                    Accept image, validate
-                                                  it, call Gemini, return
-                                                  structured analysis.
+The `/v1` routes are the student logbook ("Student logbook" below); they need a Supabase access token.
 
-  `/ask`                  POST                    Answer a follow-up
-                                                  using
-                                                  microscopy/analysis
-                                                  context.
+### `/analyze` flow
 
-  `/quiz`                 POST                    Generate quiz questions
-                                                  from analysis context.
+`prepare_image` validates and re-encodes the upload, `analyze_image` calls Gemini (with fallback), the response is validated against `Analysis`, and failures become `{"detail": ...}` errors. The eval harness reuses both functions: `app.services.images.prepare_image(data, content_type, settings) -> tuple[bytes, str]` and `app.services.gemini.analyze_image(data, mime_type, settings) -> Analysis`. Eval runs from commit `d2ea65f` onward send re-encoded, metadata-free bytes, so they are not directly comparable with earlier runs.
 
-  `/v1/me`                GET                     The signed-in user
-                                                  (Supabase token).
+### Request limits, app token, CORS
 
-  `/v1/experiments`       POST, GET               Create a draft from an
-                                                  image; list own saved
-                                                  experiments and live
-                                                  drafts (PR 4 branch).
+Details in README.md. Not covered there:
 
-  `/v1/experiments/{id}`  GET, PATCH, DELETE      Read, edit/save
-                                                  (PATCH and DELETE on
-                                                  the PR 4 branch).
-  -----------------------------------------------------------------------
-
-The `/v1` routes are the student logbook (section 5, "Student
-logbook"); they need a Supabase access token.
-
-### `/analyze` request flow
-
-1.  Receive the uploaded file (`routes/analyze.py`).
-2.  `prepare_image(...)` validates and re-encodes it (see "Upload
-    pipeline" below) and returns the cleaned bytes and their MIME type.
-3.  `analyze_image(...)` sends those bytes to Gemini (with model
-    fallback; see "Model fallback" below).
-4.  Parse/validate the response against the `Analysis` schema.
-5.  Return JSON to the frontend.
-6.  Convert validation/provider/response failures into controlled API
-    errors (`AnalysisError` → `{"detail": ...}`).
-
-The evaluation harness reuses both service functions:
-
-``` python
-app.services.images.prepare_image(data, content_type, settings) -> tuple[bytes, str]
-app.services.gemini.analyze_image(data, mime_type, settings) -> Analysis
-```
-
-Eval runs from commit `d2ea65f` onward send re-encoded, metadata-free
-bytes, so they are not directly comparable with earlier runs.
-
-### Request limits
-
-These are global limits, not per-user rate limiting or authentication.
-
--   **Body size** (`BodySizeLimitMiddleware`, `backend/app/middleware.py`,
-    a pure ASGI middleware): `/analyze` allows `MAX_IMAGE_BYTES` + 64 KiB
-    of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES`
-    (default 64 KiB); `/health` is exempt. A `Content-Length` over the
-    limit gets a 413 JSON response before anything is read. A body
-    without a usable length (chunked) is counted as it streams and gets
-    413 once it passes the limit. Either way FastAPI never parses the
-    body, so `prepare_image`, the decode lock, and Gemini are not
-    reached. Each rejection is logged with path, limit, and reason.
--   **Input caps** (`AnalysisInput` in `backend/app/schemas/analysis.py`,
-    used by `AskRequest` and `QuizRequest`): `probable_specimen` ≤ 300
-    characters, `explanation` ≤ 6000, each list ≤ 40 items of ≤ 1000
-    characters; over a cap gives 422 before Gemini. The `/analyze`
-    response model is still the uncapped `Analysis`. The caps together
-    allow more text than the 64 KiB body limit; they stop single
-    oversized fields.
--   **Daily Gemini cap** (`_DailyCallBudget` in
-    `backend/app/services/gemini.py`): at most `GEMINI_DAILY_CALL_LIMIT`
-    (default 100) Gemini attempts per UTC day, counted inside `_generate`
-    just before each `generate_content` call, so fallback attempts count.
-    Over the cap: 503 "Daily Gemini request limit for this server
-    reached…" with `Retry-After` set to the seconds until 00:00 UTC; a
-    WARNING is logged once per day. The count lives in process memory: it
-    resets on restart, and each worker process counts separately.
-    Google's own quota reset time may differ from UTC midnight. Requests
-    rejected before Gemini do not consume it.
--   Covered by mocked tests (`backend/tests/test_limits.py`); not
-    verified on Render.
-
-### App token (`APP_TOKEN`)
-
--   `AppTokenMiddleware` (`backend/app/middleware.py`) runs before
-    `BodySizeLimitMiddleware` (it is added last in `app/main.py`, so it is
-    outermost). With `APP_TOKEN` set, every path except `/health`
-    (including `/docs`) needs the header `X-ScopePilot-Token`, compared
-    with `hmac.compare_digest`. Missing or wrong → 401
-    `{"detail": "Unauthorized client."}` before the body is read. Empty
-    `APP_TOKEN` (the default) turns the check off.
--   Rejections log path and reason (`missing` or `mismatch`) only; the
-    token is a `SecretStr` and never appears in logs, errors, or reprs.
--   The app sends `EXPO_PUBLIC_APP_TOKEN` when set. `EXPO_PUBLIC_` values
-    are compiled into the app bundle, so the token can be extracted. It
-    deters casual scripts and drive-by web pages (a custom header forces
-    a CORS preflight, and CORS is off); it is **not authentication**.
-    Real protection needs user accounts.
--   Rollout order: ship the updated app first; then set `APP_TOKEN` on
-    Render; then confirm old builds get the 401 "update the app" message.
--   Covered by mocked tests (`backend/tests/test_app_token.py`,
-    `frontend/tests/api.test.cjs`); not verified on Render or in a device
-    build.
-
-### CORS
-
-CORS is intentionally not enabled. The native app does not send browser
-CORS preflights, and CORS only restricts what browsers allow pages to
-read; any other client can still call the API. It is therefore not an
-abuse control. The cost is that the web preview cannot call the backend.
+-   The daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`, default 100, counted just before each `generate_content` call, so fallbacks count) lives in process memory: it resets on restart and each worker process counts separately. Google's own quota reset time may differ from UTC midnight. Covered by mocked tests (`test_limits.py`); not verified on Render.
+-   `APP_TOKEN` (`AppTokenMiddleware`, outermost, `hmac.compare_digest`) is compiled into the app bundle via `EXPO_PUBLIC_APP_TOKEN`: a deterrent, **not authentication**. Rollout: ship the app, then set `APP_TOKEN` on Render, then confirm old builds get the 401 "update the app" message. Rejections log path and reason only. Not verified on Render or in a device build.
+-   CORS is intentionally off: the native app does not need it, and CORS is not an abuse control.
 
 ### Model fallback (`GEMINI_FALLBACK_MODELS`)
 
-`/analyze`, `/ask`, and `/quiz` share one call helper (`_generate` in
-`backend/app/services/gemini.py`).
+-   Up to 3 models, tried in order after `GEMINI_MODEL` with the same key, by the shared `_generate` helper in `services/gemini.py`. More than 3 fails startup.
+-   Moves on only for 429/`RESOURCE_EXHAUSTED` or 404/`NOT_FOUND`; every other error, and any bad response, fails immediately. If all fail: 503 if any hit quota, otherwise 502.
+-   Logs model names only (`Gemini served …`, `Gemini fallback … reason=quota|model_not_found`). Evals never fall back (section 8).
+-   Only list models verified for image input and structured JSON output; Google can retire models at any time.
+-   Covered by mocked tests (`test_fallback.py`); not verified against real Gemini 429/404 responses.
 
--   Optional comma-separated list of up to 3 models, tried in order after
-    `GEMINI_MODEL` with the same API key (no key rotation). Entries are
-    trimmed; blanks, duplicates, and the primary model are dropped. More
-    than 3 entries fails startup configuration.
--   A request moves to the next model only when Gemini returns 429 /
-    `RESOURCE_EXHAUSTED` (quota) or 404 / `NOT_FOUND` (model not found).
-    Timeouts, transport errors, other provider errors, and empty,
-    invalid, or schema-failing responses fail immediately with the usual
-    status; a bad response is never retried on another model.
--   If every model fails: 503 if any attempt hit quota, otherwise 502
-    (model unavailable).
--   Logs, model names only: INFO `Gemini served operation=… model=…
-    fallback_used=…` and WARNING `Gemini fallback operation=…
-    from_model=… to_model=… reason=quota|model_not_found`. The `app`
-    logger is set to INFO with one stderr handler in `app/main.py`.
--   Evals never fall back (section 8).
--   Only list models you have verified yourself for image input and
-    structured JSON output with your key. Google can retire models at any
-    time; recheck the list when 404s appear.
--   Covered by mocked tests (`backend/tests/test_fallback.py`); not
-    verified against real Gemini 429/404 responses.
+### Analysis contract, `/ask` and `/quiz`
 
-### Analysis response contract
+`Analysis` has `probable_specimen` (tentative), `visible_structures`, `observations`, `explanation` and `limitations`. A valid schema guarantees shape, not biological truth. `/ask` and `/quiz` use the analysis as context; both depend on model output and are not infallible.
 
-``` python
-probable_specimen: str
-visible_structures: list[str]
-observations: list[str]
-explanation: str
-limitations: list[str]
-```
+### Upload pipeline (`prepare_image`, `services/images.py`)
 
--   `probable_specimen`: tentative identification, not a confirmed
-    result.
--   `visible_structures`: structures the model reports as visible.
--   `observations`: image-specific descriptive statements.
--   `explanation`: educational interpretation.
--   `limitations`: uncertainty or caveats, such as focus, staining,
-    magnification, image quality, or ambiguous morphology.
-
-A valid schema guarantees shape, not biological truth.
-
-### `/ask` and `/quiz`
-
-`/ask` uses the existing analysis/specimen context so follow-up
-questions such as "Why are they rectangular?" have a referent. Its
-intended scope is educational microscopy/biology. `/quiz` uses the
-analysis context to generate questions; the tested flow generated three.
-Both depend on model output and should not be treated as infallible.
-
-### Upload pipeline (`prepare_image` in `backend/app/services/images.py`)
-
-**Resolved iPhone 415 (fixed 2026-10-03, commit `d2ea65f`):** iPhone
-camera JPEGs (e.g. 2268×4032, ~1.2 MB) are detected by Pillow as format
-`MPO` with two frames. The old validator mapped only `JPEG`/`PNG`/`WEBP`,
-so the declared-type check returned 415 "Image content does not match
-its declared type." (its single-frame check would also have rejected
-them). The cause was not HEIC; the app rejects HEIC before upload.
-
-Current steps, in order:
-
-1.  Cheap checks: empty → 400; over `max_image_bytes` (10 MiB) → 413;
-    declared type not `image/jpeg`, `image/png`, or `image/webp` → 415.
-2.  Header-only checks (no full decode yet), with Pillow's
-    decompression-bomb protection active:
-    -   detected format must match the declared type; `MPO` counts as
-        JPEG → otherwise 415;
-    -   width × height within `max_image_pixels` (20,000,000) → otherwise
-        413 with a message stating the limit;
-    -   exactly one frame, except MPO → otherwise 415 (animated GIF, APNG,
-        and animated WebP are rejected).
-3.  Decode under a one-at-a-time lock. A request waits up to 5 seconds
-    for the lock, then gets 503 "Server is busy…". The lock covers only
-    decode and re-encode, never the Gemini call, and is released on
-    every error path.
-4.  Decode the first frame only (for MPO, the primary image) and apply
-    EXIF orientation.
-5.  Re-encode without EXIF/GPS, XMP, comments, or PNG text chunks. The
-    ICC profile is kept only when the image mode is unchanged.
-    -   JPEG/MPO → JPEG, quality 95; modes other than RGB/L are
-        converted to RGB. This is a deliberate second lossy encode.
-    -   PNG → PNG, lossless; mode kept (including P with transparency,
-        LA, RGBA, and 16-bit grayscale `I;16`).
-    -   WebP → WebP, lossy quality 95; modes other than RGB/RGBA are
-        converted.
-    -   No resizing.
-6.  Re-encoded output over `max_encoded_image_bytes` (14 MiB, about
-    18.7 MiB as base64, below Gemini's ~20 MB inline request limit) →
-    413.
-7.  Decode/encode failure → 400.
-
-Gemini receives the re-encoded bytes with the MIME type of the output
-format. Each rejection is logged at WARNING with the rule, status,
-declared type (only if one of the three accepted types, otherwise
-`other`/`none`), and detected format. No image content is logged.
-
-Limitations:
-
--   16-bit-per-channel RGB PNGs are reduced to 8 bits per channel by
-    Pillow when decoded; only 16-bit grayscale round-trips.
--   Gemini's handling of 16-bit PNG is untested.
--   Peak memory for one 20 MP image was measured on Windows at roughly
-    +170–340 MiB (WebP highest); it has not been measured on Render.
+Steps are in README.md. iPhone camera JPEGs are detected by Pillow as `MPO` with two frames; before commit `d2ea65f` (2026-10-03) they got 415. MPO is now accepted as JPEG, first frame only. Limitations: 16-bit-per-channel RGB PNGs are reduced to 8 bits (only 16-bit grayscale round-trips); Gemini's handling of 16-bit PNG is untested; peak memory for a 20 MP image was roughly +170–340 MiB on Windows and has not been measured on Render.
 
 ### Student logbook (PR 3 create and read: merged 2026-10-11 as PR #11, live-verified)
 
-Planned slice 1: Supabase Auth login, saving an analysis as an
-experiment, and list/open/rename/delete. The backend now verifies
-Supabase access tokens (every `/v1/*` route, `GET /v1/me`) and can
-create and read experiments (PR 3). List, rename, save and delete
-exist on the PR 4 branch (`feat/experiments-list-patch-delete`, not
-yet merged; migration 0002 not yet applied). The app's login and
-experiment screens do not exist yet.
+Planned slice 1: Supabase Auth login, saving an analysis as an experiment, and list/open/rename/delete. The backend verifies Supabase access tokens (every `/v1/*` route, `GET /v1/me`) and can create and read experiments (PR 3). List, rename, save and delete exist on the PR 4 branch (`feat/experiments-list-patch-delete`, not yet merged; migration 0002 not yet applied). The app's login and experiment screens do not exist yet.
 
--   `POST /v1/experiments` (multipart `image`): validates and cleans
-    the upload with `prepare_image`, analyzes it with Gemini, and
-    stores it as a draft that expires after `DRAFT_TTL_HOURS`. Stored
-    with it: a metadata-free JPEG display copy (long edge at most
-    2048 px), a 256 px thumbnail, the model that answered and a hash
-    of the production prompt (`PROMPT_VERSION`). Returns 201 with the
-    experiment and short-lived signed image URLs.
-    -   Order: draft cap (409), `prepare_image`, display copies, the
-        per-user daily quota (`consume_gemini_call`, 429 with
-        `Retry-After`), Gemini, uploads, insert. A rejected image or a
-        failed display copy costs no quota.
-    -   On failure: if Gemini fails, nothing is stored. If an upload
-        fails, the uploaded images are deleted. If the insert fails,
-        the row is deleted first (the insert may have committed before
-        its response was lost) and the images only if that succeeded;
-        otherwise they are kept so a surviving row keeps its images.
-        On the PR 4 branch the insert goes through `create_draft`
-        (draft cap under a per-user lock, nothing written after a
-        deadline 8 s out), and the row cleanup waits until 2 s past
-        that deadline and then calls `discard_draft`.
--   PR 4 branch: `GET /v1/experiments` (own saved experiments and live
-    drafts, newest first, cursor paging, thumbnail URLs only), `PATCH
-    /v1/experiments/{id}` (title/notes, save a draft; saved cap 409),
-    `DELETE /v1/experiments/{id}` (row first, then images), and a
-    best-effort purge of drafts expired for over 5 minutes after each
-    create and list.
--   `GET /v1/experiments/{id}`: returns the caller's own experiment
-    with freshly signed image URLs. Another user's ID, a non-UUID or
-    an expired draft gives the same 404 as a missing ID.
--   Isolation lives in `backend/app/services/logbook.py`: every query
-    filters by the verified `user_id`, every storage path must start
-    with `<user_id>/`, and rows returned by Supabase are re-checked.
-    Logs carry operation names and status codes only.
--   Tests use an in-memory fake of Supabase
-    (`backend/tests/test_experiments.py`).
+-   `POST /v1/experiments` (multipart `image`): validates and cleans the upload with `prepare_image`, analyzes it with Gemini, and stores it as a draft that expires after `DRAFT_TTL_HOURS`. Stored with it: a metadata-free JPEG display copy (long edge at most 2048 px), a 256 px thumbnail, the model that answered and a hash of the production prompt (`PROMPT_VERSION`). Returns 201 with the experiment and short-lived signed image URLs.
+    -   Order: draft cap (409), `prepare_image`, display copies, the per-user daily quota (`consume_gemini_call`, 429 with `Retry-After`), Gemini, uploads, insert. A rejected image or a failed display copy costs no quota.
+    -   On failure: if Gemini fails, nothing is stored. If an upload fails, the uploaded images are deleted. If the insert fails, the row is deleted first (the insert may have committed before its response was lost) and the images only if that succeeded; otherwise they are kept so a surviving row keeps its images. On the PR 4 branch the insert goes through `create_draft` (draft cap under a per-user lock, nothing written after a deadline 8 s out), and the row cleanup waits until 2 s past that deadline and then calls `discard_draft`.
+-   PR 4 branch: `GET /v1/experiments` (own saved experiments and live drafts, newest first, cursor paging, thumbnail URLs only), `PATCH /v1/experiments/{id}` (title/notes, save a draft; saved cap 409), `DELETE /v1/experiments/{id}` (row first, then images), and a best-effort purge of drafts expired for over 5 minutes after each create and list.
+-   `GET /v1/experiments/{id}`: returns the caller's own experiment with freshly signed image URLs. Another user's ID, a non-UUID or an expired draft gives the same 404 as a missing ID.
+-   Isolation lives in `backend/app/services/logbook.py`: every query filters by the verified `user_id`, every storage path must start with `<user_id>/`, and rows returned by Supabase are re-checked. Logs carry operation names and status codes only.
+-   Tests use an in-memory fake of Supabase (`backend/tests/test_experiments.py`).
 
-Verified live (2026-10-11, user-reported, against the real Supabase
-project):
+Verified live (2026-10-11, user-reported, against the real Supabase project):
 
--   An `sb_secret_` key works with the `apikey` header alone (no
-    `Authorization` header).
--   Storage upload and signed-URL request paths, and the `signedURL`
-    format the code expects (`/object/sign/...`).
+-   An `sb_secret_` key works with the `apikey` header alone (no `Authorization` header).
+-   Storage upload and signed-URL request paths, and the `signedURL` format the code expects (`/object/sign/...`).
 -   The quota RPC: `usage_daily` counted 1 after one create.
 -   The bucket limits accept the upload.
--   Two-user isolation: user A reading A's experiment gets 200; user B
-    reading A's experiment gets 404.
+-   Two-user isolation: user A reading A's experiment gets 200; user B reading A's experiment gets 404.
 
 Still unverified:
 
--   That deleting a storage path that was never stored returns 200
-    (cleanup after a failed or timed-out upload relies on this).
+-   That deleting a storage path that was never stored returns 200 (cleanup after a failed or timed-out upload relies on this).
 -   Latency between Render and Supabase.
--   Memory on Render for the second decode (the display copies) on
-    each create.
+-   Memory on Render for the second decode (the display copies) on each create.
 
 Known trade-offs / deferred:
 
--   Addressed in PR 4 (branch `feat/experiments-list-patch-delete`;
-    migration `0002_logbook_caps.sql` not yet applied): the draft-cap
-    race (now enforced in the database under a per-user lock); the
-    insert-timeout race (5 s statement timeout, a create deadline and
-    `discard_draft`); the 500 for a stored `..` path (now 503); the
-    stale `_auth_headers` comment.
--   Orphaned storage objects persist until a sweeper exists: a crash
-    between upload and insert, a failed image delete, or an expired-draft
-    purge whose delete was still running when its re-check read. PR 6
-    account deletion must delete everything under the user's folder,
-    not only the files listed in rows.
--   A Gemini failure, or hitting the server-wide daily cap, still costs
-    one unit of the user's daily quota.
--   The stored analysis has no length cap. Add one in PR 5, before it
-    feeds `/ask` and `/quiz`.
--   The draft and saved caps rely on PostgREST's default READ COMMITTED
-    isolation (each count runs after the per-user advisory lock). Under
-    REPEATABLE READ or stricter, the snapshot predates the lock and a
-    concurrent create could be missed. Keep the default, or switch to
-    per-user counter rows locked with SELECT ... FOR UPDATE.
--   Migration 0002 sets a 5 s `statement_timeout` on `service_role`,
-    which covers every backend statement. PR 6 account deletion (cascade
-    plus storage cleanup) and any backfill must set a longer timeout for
-    their own transaction.
--   No per-user rate limit on `/v1` list, PATCH and DELETE, and every
-    list (and create) also starts an expired-draft purge (2-4 Supabase
-    calls). Add per-user limits, and run the purge at most once per user
-    per few minutes.
--   On an insert failure, cleanup waits until 2 s past the create
-    deadline (up to about 10 s) before `discard_draft`, and holds a
-    threadpool worker meanwhile. The client already gets a 503; the
-    worker cost matters only if insert failures become frequent.
--   Clock skew: the create deadline tolerates the database clock
-    lagging Render's by about 2 s (minus the discard call's latency);
-    an earlier revision tolerated only about 0.5 s, and an earlier note
-    wrongly said 2 s. Beyond that, a queued create can still insert
-    after its images were deleted (a draft without images until the
-    purge). Future hardening: a tombstone written by `discard_draft`
-    and checked by `create_draft`, which removes the clock dependence.
-    The purge margin assumes the clocks agree within 5 minutes.
--   `discard_draft` returns false both when no row exists and when the
-    row is no longer a draft, and cleanup treats both as success. A
-    draft saved from another session during the cleanup wait would lose
-    its images. Future fix: a three-way result (deleted / absent /
-    kept), deleting images only for deleted or absent.
--   `discard_draft` waits up to 6 s for the per-user lock, longer than
-    the 5 s statement timeout, so a create still running finishes or
-    rolls back first. If the discard still fails (transport error), the
-    images are kept; if the create had rolled back, they are orphaned.
--   GET treats an expired draft as missing (404) while DELETE still
-    deletes it (204). This is intended. GET decides expiry on the
-    backend clock; the database functions use the database's clock.
--   Logs: Render's start command lives in the dashboard (not the repo)
-    and must include `--no-access-log --ws none`. `--ws none` matters
-    because WebSocket handshakes log the path and query on
-    `uvicorn.error`, which the access-log flag does not cover.
-    `app/main.py` also templates IDs and drops query strings in
-    uvicorn's access log as a backstop. Never run with
-    `--log-level trace` in production: it logs whole requests,
-    including the Authorization header. Render's own HTTP request logs,
-    and Supabase's API logs (which see `user_id=eq.<uid>` and experiment
-    IDs in query strings), may still record them.
+-   Orphaned storage objects persist until a sweeper exists: a crash between upload and insert, a failed image delete, or an expired-draft purge whose delete was still running when its re-check read. PR 6 account deletion must delete everything under the user's folder, not only the files listed in rows.
+-   A Gemini failure, or hitting the server-wide daily cap, still costs one unit of the user's daily quota.
+-   The stored analysis has no length cap. Add one in PR 5, before it feeds `/ask` and `/quiz`.
+-   The draft and saved caps rely on PostgREST's default READ COMMITTED isolation (each count runs after the per-user advisory lock). Under REPEATABLE READ or stricter, the snapshot predates the lock and a concurrent create could be missed. Keep the default, or switch to per-user counter rows locked with SELECT ... FOR UPDATE.
+-   Migration 0002 sets a 5 s `statement_timeout` on `service_role`, which covers every backend statement. PR 6 account deletion (cascade plus storage cleanup) and any backfill must set a longer timeout for their own transaction.
+-   No per-user rate limit on `/v1` list, PATCH and DELETE, and every list (and create) also starts an expired-draft purge (2-4 Supabase calls). Add per-user limits, and run the purge at most once per user per few minutes.
+-   On an insert failure, cleanup waits until 2 s past the create deadline (up to about 10 s) before `discard_draft`, and holds a threadpool worker meanwhile. The client already gets a 503; the worker cost matters only if insert failures become frequent.
+-   Clock skew: the create deadline tolerates the database clock lagging Render's by about 2 s (minus the discard call's latency). Beyond that, a queued create can still insert after its images were deleted (a draft without images until the purge). Future hardening: a tombstone written by `discard_draft` and checked by `create_draft`, which removes the clock dependence. The purge margin assumes the clocks agree within 5 minutes.
+-   `discard_draft` returns false both when no row exists and when the row is no longer a draft, and cleanup treats both as success. A draft saved from another session during the cleanup wait would lose its images. Future fix: a three-way result (deleted / absent / kept), deleting images only for deleted or absent.
+-   `discard_draft` waits up to 6 s for the per-user lock, longer than the 5 s statement timeout, so a create still running finishes or rolls back first. If the discard still fails (transport error), the images are kept; if the create had rolled back, they are orphaned.
+-   GET treats an expired draft as missing (404) while DELETE still deletes it (204). This is intended. GET decides expiry on the backend clock; the database functions use the database's clock.
+-   Logs: Render's start command lives in the dashboard (not the repo) and must include `--no-access-log --ws none`. `--ws none` matters because WebSocket handshakes log the path and query on `uvicorn.error`, which the access-log flag does not cover. `app/main.py` also templates IDs and drops query strings in uvicorn's access log as a backstop. Never run with `--log-level trace` in production: it logs whole requests, including the Authorization header. Render's own HTTP request logs, and Supabase's API logs (which see `user_id=eq.<uid>` and experiment IDs in query strings), may still record them.
 
--   Schema: `supabase/migrations/0001_logbook.sql` creates
-    `experiments`, `usage_daily`, the `consume_gemini_call` function
-    and a private `experiment-images` bucket. Row-level security is
-    on, with no policies, so the app's publishable key cannot touch
-    them. Only the backend (secret key) can.
--   Settings: `SUPABASE_URL` (https origin), `SUPABASE_SECRET_KEY`
-    (backend host only, never the app or the repo), `LOGBOOK_BUCKET`,
-    `USER_DAILY_GEMINI_LIMIT`, `MAX_SAVED_EXPERIMENTS_PER_USER`,
-    `MAX_DRAFTS_PER_USER`, `DRAFT_TTL_HOURS`. The logbook counts as
-    configured only when both the URL and the secret key are set.
+Schema and settings:
+
+-   `supabase/migrations/0001_logbook.sql` creates `experiments`, `usage_daily`, the `consume_gemini_call` function and a private `experiment-images` bucket. Row-level security is on, with no policies, so the app's publishable key cannot touch them. Only the backend (secret key) can.
+-   Settings: `SUPABASE_URL` (https origin), `SUPABASE_SECRET_KEY` (backend host only, never the app or the repo), `LOGBOOK_BUCKET`, `USER_DAILY_GEMINI_LIMIT`, `MAX_SAVED_EXPERIMENTS_PER_USER`, `MAX_DRAFTS_PER_USER`, `DRAFT_TTL_HOURS`. The logbook counts as configured only when both the URL and the secret key are set.
 
 Setup (manual, not yet verified against a real project):
 
 1.  Create a free Supabase project and choose the region deliberately.
-2.  Run the migrations in the dashboard SQL editor: `0001_logbook.sql`,
-    then `0002_logbook_caps.sql`. **Apply 0002 BEFORE setting
-    `SUPABASE_URL`/`SUPABASE_SECRET_KEY` on Render**: without it,
-    `create_draft` and `discard_draft` return 404 and every create
-    leaves orphaned images.
-3.  Auth: enable email confirmation, configure a custom SMTP provider
-    (the built-in sender allows about 2 emails/hour), and use OTP codes
-    in the confirmation/recovery email templates.
-4.  Create a dedicated secret key for the backend and set the variables
-    above on Render.
+2.  Run the migrations in the dashboard SQL editor: `0001_logbook.sql`, then `0002_logbook_caps.sql`. **Apply 0002 BEFORE setting `SUPABASE_URL`/`SUPABASE_SECRET_KEY` on Render**: without it, `create_draft` and `discard_draft` return 404 and every create leaves orphaned images.
+3.  Auth: enable email confirmation, configure a custom SMTP provider (the built-in sender allows about 2 emails/hour), and use OTP codes in the confirmation/recovery email templates.
+4.  Create a dedicated secret key for the backend and set the variables above on Render.
 
-Free-tier caveats (from Supabase docs, 2026-10-07): projects pause
-after 7 days of inactivity, there are no backups, and storage is 1 GB.
+Free-tier caveats (from Supabase docs, 2026-10-07): projects pause after 7 days of inactivity, there are no backups, and storage is 1 GB.
 
 ## 6. Frontend and deployment
 
-The app has been tested on a physical iPhone (latest user-reported check:
-2026-10-03, against the Render backend). The image picker provides a
-local file URI, which is different from an HTTP URL. The app uploads the
-original file as multipart form data without converting or resizing it
-(`frontend/src/services/images.ts`); HEIC and unrecognized types are
-rejected in the app. The app shows loading, success, and error states.
-For 400/413/415 it appends the backend's `detail` to its own message;
-5xx and 422 details are intentionally never shown
-(`frontend/src/services/api.ts`). Fixed app messages cover 401 ("update
-the app"), 429, the daily-cap 503 (recognized by the prefix "Daily Gemini
-request limit", never displayed), and `/ask`/`/quiz` 413 and `/quiz` 422.
-For an `/ask` 422 the app inspects only FastAPI's structured error
-locations: a too-long question gets a question message, anything else a
-neutral "analyze the image again" message. When `EXPO_PUBLIC_APP_TOKEN` is
-set, the app sends `X-ScopePilot-Token` on all three calls, including the
-native `File.upload` path. The temporary connection-diagnostic panel has
-been removed.
+The app uploads the original picked file as multipart without converting or resizing it (`frontend/src/services/images.ts`; HEIC is rejected in the app). Error-message mapping is in README.md and `frontend/src/services/api.ts`. Last physical-iPhone check: 2026-10-03 against `https://scopepilot.onrender.com`.
 
-The working public backend URL is:
-
-``` text
-https://scopepilot.onrender.com
-```
-
-An earlier local configuration problem came from a stale PowerShell
-variable:
-
-``` powershell
-$env:EXPO_PUBLIC_API_URL
-```
-
-It had been set to `http://192.168.137.1:8000`; removing the stale value
-allowed the frontend `.env` configuration to take effect. On a physical
-phone, `localhost` refers to the phone, not the development computer.
-Local testing therefore needs a reachable LAN address or tunnel; the
-deployed HTTPS URL avoids that issue.
+Lesson from an earlier config problem: a stale PowerShell `$env:EXPO_PUBLIC_API_URL` (`http://192.168.137.1:8000`) overrode `frontend/.env`. On a physical phone `localhost` is the phone; local testing needs a LAN address or tunnel, which the deployed HTTPS URL avoids.
 
 ## 7. Prompting, guardrails, and security
 
-The Gemini service (`backend/app/services/gemini.py`) contains the
-production analysis, Q&A, and quiz prompts. Each is passed as Gemini's
-`system_instruction`. They specify the task, educational framing,
-expected output, and cautious interpretation.
+The production analysis, Q&A and quiz prompts live in `backend/app/services/gemini.py`, each passed as Gemini's `system_instruction`. They aim to keep output educational and microscopy-focused, identify a *probable* specimen, separate visual observations from explanation, avoid claiming structures only because they are normally expected, and state limitations.
 
-Prompt instructions aim to: - keep analysis educational and
-microscopy-focused; - identify a *probable* specimen; - separate direct
-visual observations from biological explanation; - avoid claiming
-structures solely because they are normally expected; - communicate
-limitations; - return the required structured fields.
-
-### Prompt injection
-
-Known status: backend mediation, application-level instructions, and
-schema validation provide some controls, but a dedicated
-prompt-injection filter has not been confirmed. Prompts alone cannot
-guarantee resistance to direct injection ("ignore previous
-instructions") or indirect injection (malicious text in an image). Do
-not claim prompt injection is fully handled. Keep secrets out of model
-context and avoid giving the model privileged tools.
-
-### Wrong or irrelevant images
-
-Distinguish: 1. Invalid file: deterministic backend validation can
-reject it. 2. Valid but irrelevant image (e.g., selfie): it may pass
-file validation and reach the VLM. Prompting may discourage unsupported
-analysis, but an explicit content-domain gate has not been confirmed. 3.
-Poor/ambiguous microscopy image: the model should report limitations,
-but this is not guaranteed to be correct.
-
-### Other failure classes
-
--   Provider error (e.g., Gemini 503): infrastructure/availability
-    issue, not a quality score.
--   Malformed model output: schema validation failure.
--   Network failure: frontend should show an error rather than crash.
--   Invalid upload: reject before calling the model where possible.
+-   **Prompt injection:** backend mediation, instructions and schema validation give some control, but no dedicated filter exists. Prompts cannot guarantee resistance to direct or indirect (text-in-image) injection; do not claim it is handled. Keep secrets out of model context and give the model no privileged tools.
+-   **Wrong images:** an invalid file is rejected deterministically; a valid but irrelevant image (e.g. a selfie) reaches the VLM, and no content-domain gate exists; a poor microscopy image should produce limitations, but this is not guaranteed.
+-   **Other failures:** provider errors (e.g. Gemini 503) are availability, not quality; malformed output fails schema validation; network failures must show an error, not crash.
 
 ## 8. Braintrust evaluation
 
-### Purpose
+Purpose: answer "wrapper" feedback with a measurable component, controlled prompt experiments through the same service path on a fixed image set.
 
-The project received feedback that it could appear to be a "wrapper."
-The evaluation work provides a measurable engineering component: run
-controlled prompt experiments through the same analysis service, compare
-outputs on a fixed set of microscopy images, and use observed trade-offs
-to guide prompt decisions.
+-   Project `ScopePilot`; harness `backend/evals/microscopy_eval.py`; images `backend/evals/images/`; images go through `prepare_image` as in production.
+-   The model is the configured `GEMINI_MODEL` (recorded runs: `gemini-3.1-flash-lite`, per handoff; not verifiable from the repository). `analyze_case` clears `GEMINI_FALLBACK_MODELS` and calls `analyze_image(..., allow_fallback=False)`, so a run never switches model. Experiment name `"<variant> | <model>"`; metadata records `gemini_model`, `prompt_variant`, `fallback: "disabled"`.
+-   `SCOPEPILOT_EVAL_PROMPT_VARIANT` selects the variant. The harness swaps the service prompt under a lock and restores it in `finally`; the production prompt is never modified.
+-   Code variant names (`prompt-a-naive-baseline`, `prompt-b-scopepilot-production`, `prompt-c-overconstrained`, `prompt-d-synthesized`) differ from the recorded results' names (`prompt-a-baseline`, `prompt-b-visibility-constrained`, `prompt-c-educational-conservative`); the mapping is unreconciled. In the code, `prompt-a-naive-baseline` sends the unchanged production prompt and the other three append extra instructions.
 
-### Harness and run command
+**Dataset:** five cases (`blood_smear_1`, `yeast_1`, `onion_epidermis_1`, `cheek_1`, `plant_tissue_1`) with manual labels (specimen; structures; kingdom). Only the onion image was visually inspected; the labels are not expert-validated ground truth.
 
--   Braintrust project: `ScopePilot`
--   Harness: `backend/evals/microscopy_eval.py`
--   Images: `backend/evals/images/`
--   Model: the harness has no model setting of its own; it uses the
-    configured `GEMINI_MODEL` (`get_settings()`). Model in the recorded
-    runs: `gemini-3.1-flash-lite`, per handoff; not verifiable from the
-    repository.
--   Environment variable `SCOPEPILOT_EVAL_PROMPT_VARIANT` selects the
-    prompt variant; the experiment name matches it.
--   Images go through `prepare_image` before Gemini, as in production.
--   Evals are pinned to `GEMINI_MODEL`: `analyze_case` clears
-    `GEMINI_FALLBACK_MODELS` and calls `analyze_image(...,
-    allow_fallback=False)`, so a run never switches model. The
-    experiment name is `"<variant> | <model>"` and the experiment
-    metadata records `gemini_model`, `prompt_variant`, and
-    `fallback: "disabled"`.
--   The harness temporarily replaces the service prompt and restores it
-    in `finally`; a lock protects concurrent replacement. These are
-    evaluation-only changes; production prompt is not modified by
-    running an experiment.
+**Scorers:**
 
-From `backend/`:
-
-``` powershell
-$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-naive-baseline"
-.\.venv\Scripts\braintrust.exe eval evals/microscopy_eval.py
-```
-
-Valid values in the current code (`PROMPT_VARIANTS`):
-`prompt-a-naive-baseline`, `prompt-b-scopepilot-production`,
-`prompt-c-overconstrained`, `prompt-d-synthesized`.
-
-These differ from the names used for the recorded results below
-(`prompt-a-baseline`, `prompt-b-visibility-constrained`,
-`prompt-c-educational-conservative`); the mapping between the two sets
-is unreconciled. In the code, `prompt-a-naive-baseline` sends the
-unchanged production prompt, and the other three append extra
-instructions to it.
-
-From repo root:
-
-``` powershell
-$env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-naive-baseline"
-.\backend\.venv\Scripts\braintrust.exe eval backend/evals/microscopy_eval.py
-```
-
-### Dataset
-
-Five cases: - `blood_smear_1.jpg` - `yeast_1.jpg` -
-`onion_epidermis_1.jpg` - `cheek_1.jpg` - `plant_tissue_1.jpg`
-
-Recorded expected annotations: - onion: `onion epidermis`; `cell wall`;
-plant - blood: `blood smear`; `red blood cells`; animal - cheek:
-`cheek epithelial cells`; `nucleus`, `cell membrane`; animal - yeast:
-`yeast cells`; `cell wall`; fungal - plant tissue: `plant tissue`;
-`cell wall`; plant
-
-Only the onion image was visually inspected in the earlier discussion.
-The remaining annotations are generic manual labels and should not be
-called expert-validated ground truth.
-
-### Scorers
-
-1.  `specimen_accuracy_lexical`: normalized case/whitespace and
-    containment-based 0/1 string comparison. It is **lexical
-    consistency**, not biological accuracy; synonyms can be false
-    negatives.
-2.  `structure_recall`: matched expected structures / expected
-    structures. It measures omissions against labels but does not
-    penalize extra unsupported structures.
-3.  `schema_validity`: checks that output contains exactly the five
-    expected fields. It measures structure, not factual correctness.
-4.  `limitation_awareness`: 1 if at least one non-empty limitation
-    exists, otherwise 0. It does not assess whether the limitation is
-    accurate or useful.
+1.  `specimen_accuracy_lexical`: normalized containment 0/1. Lexical consistency, **not** biological accuracy; synonyms can be false negatives.
+2.  `structure_recall`: matched / expected structures; does not penalize extra unsupported structures.
+3.  `schema_validity`: exactly the five fields; structure, not factual correctness.
+4.  `limitation_awareness`: 1 if any non-empty limitation; does not judge its accuracy.
 5.  Duration is performance, not accuracy.
 
-### Semantic scorer attempt
+An `LLMClassifier` semantic scorer (`specimen_accuracy_semantic`) is defined but not in `scores`: its `gpt-4o` provider was not configured in Braintrust. Do not report semantic results.
 
-An `LLMClassifier` semantic scorer was attempted to handle cases such as
-`onion epidermis` versus `Allium cepa (onion) epidermal cell`. Autoevals
-tried to use `gpt-4o` through Braintrust Gateway, but that provider was
-not configured for the `ScopePilot` organization. The semantic scorer is
-still defined in the harness (`specimen_accuracy_semantic`) but is not in
-the `scores` list; do not report semantic results.
+**Variants:** A, baseline: the mature production prompt. B, visibility-constrained: report only clearly visible structures. C, educational-conservative: probable ID from visible evidence, observations separated from explanation. D, synthesized: keep useful caution without over-restricting structures.
 
-### Prompt variants
+**Recorded results** (as recorded in this handoff; old variant names; predate upload re-encoding; not verifiable from the repository):
 
-**A --- baseline / production:** the existing project-specific
-production prompt, without extra evaluation-only instructions. It is a
-mature baseline, not an intentionally weak prompt.
+| Variant | Limitation awareness | Schema validity | Lexical specimen | Structure recall | Duration |
+|---|---|---|---|---|---|
+| A --- baseline | 100% | 100% | 40% | 100% | 15.29 s |
+| B --- visibility-constrained | 100% | 100% | 20% | 80% | 15.51 s |
+| C --- educational-conservative | 100% | 100% | 20% | 80% | 14.88 s |
+| D --- synthesized | 100% | 100% | 40% | 100% | 17.06 s |
 
-**B --- visibility-constrained:** added stronger instructions to report
-only structures clearly supported by visible evidence, avoid mentioning
-expected-but-unseen structures, and use limitations when image quality,
-staining, magnification, focus, or field of view makes identification
-uncertain.
+A's first run hit a transient Gemini 503; the figures are from the completed rerun. Durations are noisy and provider-dependent.
 
-**C --- educational-conservative:** emphasized educational use, probable
-identification based on visible evidence, separation of observations
-from biology explanation, avoiding hidden/non-visible/expected-only
-structures, limitations for ambiguous images, and helping the student
-verify rather than treating AI as ground truth.
+**Interpretation:** in this five-case pilot the more conservative B/C prompts coincided with recall falling to 80%, and D restored it to 100%. Prompt wording affects measured behavior; this does **not** prove D is universally superior or that hallucinations are eliminated. Per-image qualitative review is needed alongside aggregate scores.
 
-**D --- synthesized:** combined lessons from the baseline and the more
-conservative variants, aiming to retain useful caution and educational
-framing without over-restricting structure reporting.
-
-### Recorded results
-
-As recorded in this handoff (variant names as used at the time; see the
-naming note above). These runs predate the upload re-encoding change and
-are not verifiable from the repository.
-
-  -------------------------------------------------------------------------------------------
-  Variant                      Limitation       Schema      Lexical    Structure     Duration
-                                awareness     validity     specimen       recall 
-                                                              score              
-  -------------------------- ------------ ------------ ------------ ------------ ------------
-  A --- baseline                     100%         100%          40%         100%      15.29 s
-
-  B ---                              100%         100%          20%          80%      15.51 s
-  visibility-constrained                                                         
-
-  C ---                              100%         100%          20%          80%      14.88 s
-  educational-conservative                                                       
-
-  D --- synthesized                  100%         100%          40%         100%      17.06 s
-  -------------------------------------------------------------------------------------------
-
-A had an initial run with a transient Gemini 503; a subsequent run
-completed successfully and the figures above refer to the completed run.
-B compared with A showed −20 percentage points in lexical specimen score
-and −20 points in structure recall. C compared with B showed no change
-in those quality metrics. D compared with C showed +20 points in lexical
-score and +20 points in structure recall. Durations are noisy and
-provider-dependent.
-
-### Interpretation
-
-In this five-case pilot, the more conservative B/C prompts coincided
-with structure recall falling from 100% to 80%. The synthesized D prompt
-restored measured recall to 100%, while schema validity and limitation
-awareness remained at 100%. This suggests that excessive conservatism
-can omit expected structures and that prompt wording affects measured
-behavior. It does **not** prove D is universally superior or that
-hallucinations have been eliminated. The lexical score is too weak to be
-interpreted as biological accuracy. Qualitative, per-image output review
-is necessary alongside aggregate scores.
-
-### Defensible review explanation
-
-"I used Braintrust to compare four prompt variants on the same five
-microscopy cases using the same model, service path, and deterministic
-scorers. The baseline already contained project-specific instructions.
-The visibility-constrained and educational-conservative variants were
-more restrictive, and measured structure recall fell from 100% to 80%. I
-then synthesized a prompt that retained useful caution and educational
-framing without the same degree of restriction; in this pilot it
-restored recall to 100%, while schema validity and limitation awareness
-remained at 100%. This is a small pilot, not proof of general
-superiority, and the lexical label metric has known limitations."
+Defensible explanation: "I compared four prompt variants on the same five cases with the same model, service path and deterministic scorers. The more restrictive variants lowered structure recall from 100% to 80%; a synthesized prompt kept the caution and restored recall in this pilot. This is a small pilot, not proof of general superiority, and the lexical metric has known limitations."
 
 ## 9. Evaluation limitations and improvement backlog
 
-1.  Lexical specimen matching can mark semantically equivalent names as
-    wrong; add validated synonym/ontology normalization or a semantic
-    evaluator.
-2.  The semantic judge is disabled because its provider was not
-    configured; configure and validate an evaluator before reporting
-    such scores.
-3.  The five-image dataset is a pilot; expand it across specimens,
-    magnifications, staining, focus, and image quality.
-4.  Existing labels need faculty/biology-expert validation.
-5.  Recall does not penalize extra structures; add expert-reviewed
-    negative labels and precision/F1 where justified.
-6.  Hallucination scoring is incomplete; unannotated does not mean
-    false.
-7.  Run repeated trials to quantify output variability.
-8.  Separate provider failures (503/quota) from model-quality outcomes;
-    consider eval-only retries for transient 503s.
-9.  Braintrust token/cost fields appeared as zero; do not interpret them
-    as true zero usage. Add valid provider tracing.
+1.  Lexical matching marks equivalent names wrong; add synonym/ontology normalization or a validated semantic evaluator.
+2.  The semantic judge is disabled; configure and validate it before reporting such scores.
+3.  Expand the five-image pilot across specimens, magnifications, staining, focus and quality.
+4.  Get faculty/biology-expert validation of labels.
+5.  Recall ignores extra structures; add expert negative labels and precision/F1 where justified.
+6.  Hallucination scoring is incomplete; unannotated does not mean false.
+7.  Run repeated trials to quantify variability.
+8.  Separate provider failures (503/quota) from quality; consider eval-only retries for transient 503s.
+9.  Braintrust token/cost fields showed zero; that is not true zero usage. Add valid provider tracing.
 10. Evaluate RAG against VLM-only output once implemented.
-11. Add a human rubric for educational clarity, correctness, usefulness,
-    and appropriateness.
-12. Measure latency/cost trade-offs with reliable telemetry.
+11. Add a human rubric for clarity, correctness, usefulness and appropriateness.
+12. Measure latency/cost with reliable telemetry.
 
-## 10. Technical contribution and how to discuss "wrapper" criticism
+## 10. Technical contribution and "wrapper" criticism
 
-Honest framing:
+> ScopePilot is an evaluation-driven multimodal educational system. Its engineering contribution is integrating a pretrained VLM into a mobile-to-backend workflow, validating inputs and structured outputs, supporting context-aware learning interactions, and experimentally studying prompt-induced reliability trade-offs. It does not claim a novel neural architecture or clinical-grade microscopy accuracy.
 
-> ScopePilot is an evaluation-driven multimodal educational system. Its
-> engineering contribution is integrating a pretrained VLM into a
-> mobile-to-backend workflow, validating inputs and structured outputs,
-> supporting context-aware learning interactions, and experimentally
-> studying prompt-induced reliability trade-offs. It does not claim a
-> novel neural architecture or clinical-grade microscopy accuracy.
-
-If asked what remains if Gemini is removed: the current product would
-lose its inference engine, but the mobile workflow, API boundary,
-validation, structured contract, learning interactions, and evaluation
-harness remain. The model is a replaceable component, not a model
-trained by the project.
-
-Avoid claiming: - a novel neural architecture; - hallucination-free
-output; - guaranteed correct identification; - RAG verifies visual
-evidence; - prompt injection is fully solved; - 100% recall means
-perfect biological accuracy; - five images establish general
-performance.
+Without Gemini the product loses its inference engine, but the mobile workflow, API boundary, validation, structured contract, learning interactions, and evaluation harness remain. Claims to avoid are listed under "Honesty rules" in `CLAUDE.md`.
 
 ## 11. Useful commands
 
-Start backend from `backend/`:
-
-``` powershell
-.\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload --no-access-log --ws none
-```
-
-If venv is active:
+From `backend/` with the venv active (Render needs `--no-access-log --ws none` too):
 
 ``` powershell
 uvicorn app.main:app --reload --no-access-log --ws none
 ```
 
-Local API: `http://127.0.0.1:8000`\
-Swagger: `http://127.0.0.1:8000/docs`
-
-Run tests from the repository root:
+Local API `http://127.0.0.1:8000`, Swagger `/docs`. Tests from the repository root:
 
 ``` powershell
 Push-Location backend; .\.venv\Scripts\python.exe -m pytest -q --basetemp="$env:USERPROFILE\pytest-tmp"; Pop-Location
 Push-Location frontend; npm.cmd run typecheck; npm.cmd test; Pop-Location
 ```
 
-Run evaluation from `backend/`:
+Eval from `backend/`:
 
 ``` powershell
 $env:SCOPEPILOT_EVAL_PROMPT_VARIANT="prompt-a-naive-baseline"
 .\.venv\Scripts\braintrust.exe eval evals/microscopy_eval.py
 ```
 
-Known evaluation dependencies: - `braintrust==0.37.0` -
-`autoevals==0.1.0` - `openai==1.109.1` - `backend/requirements-dev.txt`
-includes `braintrust[cli]==0.37.0` and `autoevals==0.1.0`.
+Eval dependencies: `braintrust==0.37.0`, `autoevals==0.1.0`, `openai==1.109.1`; `backend/requirements-dev.txt` includes `braintrust[cli]==0.37.0` and `autoevals==0.1.0`.
 
 ## 12. Recommended product next steps
 
-The mobile-upload 415 and user-facing upload errors were resolved on
-2026-10-03 (see section 5). Remaining:
-
 1.  Work through "Known issues / follow-up tasks" in section 2.
 2.  Add or verify explicit handling for valid but non-microscopy images.
-3.  Harden and adversarially test `/ask` scope and direct/indirect
-    prompt injection.
-4.  Reconcile eval variant names, then review individual A/B/C/D
-    outputs per image, not just aggregate scores. Re-run the eval to set
-    a baseline with re-encoded images.
+3.  Harden and adversarially test `/ask` scope and direct/indirect prompt injection.
+4.  Reconcile eval variant names, review A/B/C/D outputs per image, and re-run the eval to set a baseline with re-encoded images.
 5.  Expand and expert-validate the dataset.
-6.  Improve semantic matching and hallucination evaluation only where
-    ground truth supports it.
+6.  Improve semantic matching and hallucination evaluation only where ground truth supports it.
 7.  Implement and separately evaluate RAG.
 8.  Evaluate educational usability with students/instructors.
-9.  Keep experimental prompt changes isolated from the production
-    prompt.
+9.  Keep experimental prompt changes isolated from the production prompt.
 
 ## 13. Instructions for Claude Code
 
--   Treat the repository as the source of truth; this handoff may lag
-    behind later changes. `CLAUDE.md` holds the working rules.
--   Inspect relevant files and current Git state before proposing
-    changes.
--   For risky changes, plan first and wait for approval before editing.
--   Keep changes precise and focused; do not touch unrelated files.
-    Explain architectural trade-offs.
--   Run the relevant tests/build after edits and report results
-    honestly.
--   Clearly distinguish implemented, partially implemented, and planned
-    features.
--   Use the official name **ScopePilot** (not the old name MicroLens).
--   Preserve the educational, non-diagnostic scope.
--   Never call lexical matching biological accuracy.
--   Never claim prompts guarantee injection resistance or
-    hallucination-free outputs.
+Treat the repository as the source of truth; this handoff may lag behind later changes. `CLAUDE.md` holds the working rules (plan first, focused changes, honest test reports, implemented vs planned, the name **ScopePilot**, educational non-diagnostic scope).
