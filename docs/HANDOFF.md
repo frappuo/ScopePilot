@@ -510,7 +510,7 @@ Limitations:
 -   Peak memory for one 20 MP image was measured on Windows at roughly
     +170–340 MiB (WebP highest); it has not been measured on Render.
 
-### Student logbook (in progress: create and read)
+### Student logbook (PR 3 create and read: merged 2026-10-11 as PR #11, live-verified)
 
 Planned slice 1: Supabase Auth login, saving an analysis as an
 experiment, and list/open/rename/delete. The backend now verifies
@@ -542,8 +542,27 @@ create and read experiments (PR 3). List, rename, save and delete
     with `<user_id>/`, and rows returned by Supabase are re-checked.
     Logs carry operation names and status codes only.
 -   Tests use an in-memory fake of Supabase
-    (`backend/tests/test_experiments.py`); nothing has been run against
-    a real Supabase project yet.
+    (`backend/tests/test_experiments.py`).
+
+Verified live (2026-10-11, user-reported, against the real Supabase
+project):
+
+-   An `sb_secret_` key works with the `apikey` header alone (no
+    `Authorization` header).
+-   Storage upload and signed-URL request paths, and the `signedURL`
+    format the code expects (`/object/sign/...`).
+-   The quota RPC: `usage_daily` counted 1 after one create.
+-   The bucket limits accept the upload.
+-   Two-user isolation: user A reading A's experiment gets 200; user B
+    reading A's experiment gets 404.
+
+Still unverified:
+
+-   That deleting a storage path that was never stored returns 200
+    (cleanup after a failed or timed-out upload relies on this).
+-   Latency between Render and Supabase.
+-   Memory on Render for the second decode (the display copies) on
+    each create.
 
 Known trade-offs / deferred:
 
@@ -567,6 +586,8 @@ Known trade-offs / deferred:
 -   A stored image path containing `..` (possible only if the database
     is tampered with) gives a 500 instead of the controlled 503. No
     other user's file is signed.
+-   PR 4: update the stale 'not yet verified' comment in
+    `_auth_headers` (now verified live).
 
 -   Schema: `supabase/migrations/0001_logbook.sql` creates
     `experiments`, `usage_daily`, the `consume_gemini_call` function
