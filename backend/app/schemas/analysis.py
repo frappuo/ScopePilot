@@ -1,8 +1,10 @@
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+# UTF-8 size of the compact JSON of a stored logbook analysis (field caps alone allow ~126 KB).
+MAX_STORED_ANALYSIS_BYTES = 32 * 1024
 
 
 class Analysis(BaseModel):
@@ -26,3 +28,13 @@ class AnalysisInput(Analysis):
     observations: list[CappedText] = Field(max_length=40)
     explanation: str = Field(min_length=1, max_length=6000)
     limitations: list[CappedText] = Field(min_length=1, max_length=40)
+
+
+class StoredAnalysis(AnalysisInput):
+    """An analysis the logbook stores; experiment-scoped /ask and /quiz read it back."""
+
+    @model_validator(mode="after")
+    def _within_stored_size(self) -> "StoredAnalysis":
+        if len(self.model_dump_json().encode("utf-8")) > MAX_STORED_ANALYSIS_BYTES:
+            raise ValueError("Analysis is too large to store.")
+        return self

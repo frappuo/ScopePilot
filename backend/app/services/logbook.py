@@ -19,6 +19,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.schemas.analysis import StoredAnalysis
 from app.schemas.experiment import Experiment, ExperimentPage, ExperimentSummary, ExperimentUpdate
 from app.services.errors import AnalysisError
 from app.services.gemini import PROMPT_VERSION, analyze_image_with_model
@@ -48,6 +49,7 @@ TOO_MANY_SAVED = "Too many saved experiments. Delete one first."
 TITLE_REQUIRED = "A title is required to save."
 INVALID_CURSOR = "Invalid cursor."
 DAILY_LIMIT = "Daily analysis limit reached for your account. Try again after 00:00 UTC."
+INVALID_ANALYSIS = "Gemini returned an invalid or empty analysis. Please try again."
 
 # Test hooks: tests install an httpx.MockTransport (None uses the real network) and replace
 # _wait so that cleanup does not really sleep.
@@ -308,14 +310,16 @@ def _discard_quietly(user_id: str, experiment_id: str, deadline: datetime, setti
 def create_experiment(user_id: str, data: bytes, content_type: str | None, settings: Settings) -> Experiment:
     """Analyze an upload and store it as a draft.
 
-    Order: draft cap, image validation, display copies, quota, Gemini, uploads, insert.
-    A rejected image, or one whose display copies cannot be made (busy, too large),
-    costs no quota. If Gemini fails, nothing is stored. If an upload fails, the objects
-    already uploaded are deleted. create_draft writes nothing after a deadline 8 s out. If
-    the insert fails, cleanup waits for that deadline, removes the row with discard_draft
-    (the insert may have committed before its response was lost), then the objects; if
-    the discard fails, the objects are kept so a surviving row never loses its images.
-    A draft_limit, late or invalid_arguments result means no row, so only objects go.
+    Order: draft cap, image validation, display copies, quota, Gemini, stored-analysis cap,
+    uploads, insert. A rejected image, or one whose display copies cannot be made (busy,
+    too large), costs no quota. If Gemini fails, or its analysis exceeds the StoredAnalysis
+    caps (field caps, 32 KiB in total), nothing is stored and the quota unit stays spent.
+    If an upload fails, the objects already uploaded are deleted. create_draft writes
+    nothing after a deadline 8 s out. If the insert fails, cleanup waits for that deadline,
+    removes the row with discard_draft (the insert may have committed before its response
+    was lost), then the objects; if the discard fails, the objects are kept so a surviving
+    row never loses its images. A draft_limit, late or invalid_arguments result means no
+    row, so only objects go.
     """
     if count_live_drafts(user_id, settings) >= settings.max_drafts_per_user:
         raise AnalysisError(409, TOO_MANY_DRAFTS)
@@ -325,6 +329,12 @@ def create_experiment(user_id: str, data: bytes, content_type: str | None, setti
         retry_after = _seconds_until_utc_midnight(datetime.now(timezone.utc))
         raise AnalysisError(429, DAILY_LIMIT, headers={"Retry-After": str(retry_after)})
     analysis, model = analyze_image_with_model(cleaned, mime_type, settings)
+    try:
+        stored = StoredAnalysis.model_validate(analysis.model_dump())
+    except ValidationError:
+        # No content or ids in the log; "from None" keeps the input values out of tracebacks.
+        logger.warning("Logbook analysis rejected reason=too_long")
+        raise AnalysisError(502, INVALID_ANALYSIS) from None
 
     experiment_id = str(uuid.uuid4())
     image_path, thumb_path = _object_paths(user_id, experiment_id)
@@ -339,7 +349,7 @@ def create_experiment(user_id: str, data: bytes, content_type: str | None, setti
         deadline = datetime.now(timezone.utc) + timedelta(seconds=CREATE_DEADLINE_SECONDS)
         result = insert_experiment(user_id, {
             "id": experiment_id,
-            "analysis": analysis.model_dump(),
+            "analysis": stored.model_dump(),
             "model": model,
             "prompt_version": PROMPT_VERSION,
             "image_path": image_path,

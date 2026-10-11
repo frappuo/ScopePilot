@@ -16,9 +16,11 @@ import pytest
 from fastapi.testclient import TestClient
 from google.genai import errors
 from PIL import Image
+from pydantic import ValidationError
 
 from app.config import Settings, get_settings
 from app.main import app
+from app.schemas.analysis import MAX_STORED_ANALYSIS_BYTES, Analysis, StoredAnalysis
 from app.services import gemini, images, logbook
 from app.services.auth import AuthenticatedUser, AuthError
 from app.services.errors import AnalysisError
@@ -616,6 +618,62 @@ def test_gemini_failure_stores_nothing(client, fake, sdk, break_gemini, status):
     assert fake.by("POST", "/storage/") == []
     assert fake.inserts() == []
     assert fake.objects == {} and fake.rows == {}
+
+
+def analysis_of_size(total_bytes, base):
+    """base with observations padded so that its compact JSON is exactly total_bytes in UTF-8."""
+    analysis = {**base, "observations": []}
+
+    def size():
+        return len(Analysis(**analysis).model_dump_json().encode("utf-8"))
+
+    while size() + 1003 <= total_bytes:  # A 1000-char item adds 1000 + 2 quotes + 1 comma.
+        analysis["observations"].append("o" * 1000)
+    analysis["observations"].append("o" * (total_bytes - size() - 3))
+    assert size() == total_bytes
+    return analysis
+
+
+OVERSIZE_MARKER = "marker-7f3c"
+MARKED = {**RESULT, "probable_specimen": f"Possible {OVERSIZE_MARKER} specimen"}
+
+
+@pytest.mark.parametrize("analysis", [
+    analysis_of_size(MAX_STORED_ANALYSIS_BYTES + 1, MARKED),
+    {**MARKED, "observations": ["Rectangular cells"] * 41},
+    {**MARKED, "explanation": "x" * 6001},
+], ids=["total_size", "41_observations", "long_explanation"])
+def test_create_rejects_oversized_analysis(client, fake, sdk, caplog, analysis):
+    sdk.return_value = SimpleNamespace(text=json.dumps(analysis))
+    with caplog.at_level(logging.DEBUG):
+        response = create(client)
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Gemini returned an invalid or empty analysis. Please try again."}
+    assert sdk.call_count == 1 and len(fake.by("POST", "/rest/v1/rpc/consume_gemini_call")) == 1
+    assert fake.by("POST", "/storage/") == [] and fake.by("DELETE", "/storage/") == []
+    assert fake.inserts() == [] and fake.discards() == []
+    assert fake.objects == {} and fake.rows == {}
+    assert "Logbook analysis rejected reason=too_long" in caplog.text
+    assert OVERSIZE_MARKER not in caplog.text and USER_A not in caplog.text
+
+
+def test_analysis_at_cap_is_stored_unchanged(client, fake, sdk):
+    analysis = analysis_of_size(MAX_STORED_ANALYSIS_BYTES, RESULT)
+    sdk.return_value = SimpleNamespace(text=json.dumps(analysis))
+    response = create(client)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["analysis"] == analysis
+    assert fake.rows[body["id"]]["analysis"] == analysis
+    assert client.get(f"/v1/experiments/{body['id']}", headers=auth()).json()["analysis"] == analysis
+
+
+def test_stored_analysis_cap_counts_utf8_bytes():
+    analysis = {**RESULT, "observations": ["é" * 1000] * 17}
+    as_json = Analysis(**analysis).model_dump_json()
+    assert len(as_json) < MAX_STORED_ANALYSIS_BYTES < len(as_json.encode("utf-8"))
+    with pytest.raises(ValidationError, match="too large to store"):
+        StoredAnalysis.model_validate(analysis)
 
 
 @pytest.mark.parametrize("failure", [500, "transport"])
