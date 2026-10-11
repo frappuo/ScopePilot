@@ -510,7 +510,7 @@ Limitations:
 -   Peak memory for one 20 MP image was measured on Windows at roughly
     +170–340 MiB (WebP highest); it has not been measured on Render.
 
-### Student logbook (in progress: create and read)
+### Student logbook (PR 3 create and read: merged 2026-10-11 as PR #11, live-verified)
 
 Planned slice 1: Supabase Auth login, saving an analysis as an
 experiment, and list/open/rename/delete. The backend now verifies
@@ -586,6 +586,8 @@ Known trade-offs / deferred:
 -   A stored image path containing `..` (possible only if the database
     is tampered with) gives a 500 instead of the controlled 503. No
     other user's file is signed.
+-   PR 4: update the stale 'not yet verified' comment in
+    `_auth_headers` (now verified live).
 
 -   Schema: `supabase/migrations/0001_logbook.sql` creates
     `experiments`, `usage_daily`, the `consume_gemini_call` function
