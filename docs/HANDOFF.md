@@ -136,7 +136,7 @@ Details in README.md. Not covered there:
 
 Steps are in README.md. iPhone camera JPEGs are detected by Pillow as `MPO` with two frames; before commit `d2ea65f` (2026-10-03) they got 415. MPO is now accepted as JPEG, first frame only. Limitations: 16-bit-per-channel RGB PNGs are reduced to 8 bits (only 16-bit grayscale round-trips); Gemini's handling of 16-bit PNG is untested; peak memory for a 20 MP image was roughly +170–340 MiB on Windows and has not been measured on Render.
 
-### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14; PR 5)
+### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14 and PR 5 merged 2026-10-12 as #16, both live-verified locally)
 
 Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. Only the backend part is done; the app's login and logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), and answer questions and build quizzes from an experiment's stored analysis (PR 5). The app's login and experiment screens do not exist yet.
 
@@ -152,7 +152,7 @@ Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/ren
 -   `GET /v1/me` returns `usage` (`used_today`, `daily_limit`, `remaining`, `resets_at` = next 00:00 UTC), read from `usage_daily` with a 3 s timeout (`USAGE_TIMEOUT_SECONDS`). The timeout applies per connect, read and write step, not to the whole request, so a slow or trickling response can still hold `/v1/me` somewhat longer. Any failure or malformed row gives 200 with `usage: null` and a log line with op and status only. The backend clock picks the day while the quota RPC uses the database clock, so the two can disagree for a few seconds around midnight.
 -   Logs template experiment paths: `/v1/experiments/{id}`, `/v1/experiments/{id}/ask`, `/v1/experiments/{id}/quiz`. Any other path under the prefix logs as `/v1/experiments/{id}`. This covers app logs and, as a backstop, uvicorn's access log.
 -   Isolation lives in `backend/app/services/logbook.py`: every query filters by the verified `user_id`, every storage path must start with `<user_id>/`, and rows returned by Supabase are re-checked. Logs carry operation names and status codes only.
--   Tests use an in-memory fake of Supabase (`backend/tests/test_experiments.py`). PR 5 (ask, quiz, caps, quota, `/v1/me` usage, log templates) is covered by mocked tests only: backend suite 518 passed, 1 skipped (httptools not installed).
+-   Tests use an in-memory fake of Supabase (`backend/tests/test_experiments.py`). PR 5 (ask, quiz, caps, quota, `/v1/me` usage, log templates) is covered by mocked tests (backend suite 518 passed, 1 skipped, httptools not installed) and was also live-verified locally on 2026-10-12 (below).
 
 Verified live (2026-10-11, user-reported, against the real Supabase project):
 
@@ -162,13 +162,21 @@ Verified live (2026-10-11, user-reported, against the real Supabase project):
 -   The bucket limits accept the upload.
 -   Two-user isolation: user A reading A's experiment gets 200; user B reading A's experiment gets 404.
 
+Verified live (2026-10-12, user-reported; backend run locally against the real Supabase project and real Gemini, two test users A and B):
+
+-   Migration 0002 is applied: `create_draft`, `discard_draft`, `update_experiment` and `consume_gemini_call` exist, and `service_role` has `statement_timeout` = 5 s.
+-   PR 4: create goes through `create_draft`. List returns the user's own item with a signed thumbnail and no next page. PATCH saving without a title gives 422 "A title is required to save."; a title plus save sets `saved_at` and clears `expires_at`. DELETE gives 204; then GET 404, a repeat DELETE 404, an empty list, and the images are gone from storage. The repeat DELETE logged no cleanup failure, so deleting storage paths that no longer exist succeeds.
+-   PR 5: experiment ask and quiz work (quiz: 3 questions, 4 options each). `/v1/me` usage went 0 -> 3 after create, ask and quiz (remaining 37, `resets_at` the next 00:00 UTC); user B's usage stayed 0.
+-   Isolation: user B got 404 "Experiment not found." on read, ask, quiz, PATCH and DELETE of A's experiment, and A's experiment was unchanged.
+-   Orphans: 10 image pairs with no rows were found and removed in one user's folder, uploaded 2026-10-11 between 20:31 and 20:35 UTC. Most likely cause: creates run before migration 0002 was applied (`create_draft`/`discard_draft` returned 404, so cleanup kept the images by design). This confirms the "apply 0002 first" setup step and the need for a sweeper.
+-   Auth settings: sign-ups open, email confirmation on, custom SMTP off. Custom SMTP must be configured before real users sign up.
+
 Still unverified:
 
--   That deleting a storage path that was never stored returns 200 (cleanup after a failed or timed-out upload relies on this).
 -   Latency between Render and Supabase.
 -   Memory on Render for the second decode (the display copies) on each create.
--   PR 5 against the real Supabase project and real Gemini: experiment ask/quiz, quota counting across create/ask/quiz, and the `usage_daily` read in `/v1/me`.
--   PR 4 against the real project (list, PATCH, DELETE, purge, `create_draft`/`discard_draft` from migration 0002).
+-   The logbook on Render: `SUPABASE_URL` and `SUPABASE_SECRET_KEY` are not set there yet.
+-   The expired-draft purge and the 409 draft and saved caps were not exercised live.
 
 Known trade-offs / deferred:
 
@@ -192,7 +200,7 @@ Schema and settings:
 -   `supabase/migrations/0002_logbook_caps.sql` (PR 4) adds `create_draft`, `discard_draft` and `update_experiment` (draft and saved caps under a per-user lock) and a 5 s `statement_timeout` on `service_role`. PR 5 needs no migration.
 -   Settings: `SUPABASE_URL` (https origin), `SUPABASE_SECRET_KEY` (backend host only, never the app or the repo), `LOGBOOK_BUCKET`, `USER_DAILY_GEMINI_LIMIT` (default 40, shared by create, ask and quiz), `MAX_SAVED_EXPERIMENTS_PER_USER`, `MAX_DRAFTS_PER_USER`, `DRAFT_TTL_HOURS`. The logbook counts as configured only when both the URL and the secret key are set.
 
-Setup (manual, not yet verified against a real project):
+Setup (manual; steps 1-2 done on the real project, step 3 partly done (SMTP still off), step 4 done locally but not on Render):
 
 1.  Create a free Supabase project and choose the region deliberately.
 2.  Run the migrations in the dashboard SQL editor: `0001_logbook.sql`, then `0002_logbook_caps.sql`. **Apply 0002 BEFORE setting `SUPABASE_URL`/`SUPABASE_SECRET_KEY` on Render**: without it, `create_draft` and `discard_draft` return 404 and every create leaves orphaned images.
