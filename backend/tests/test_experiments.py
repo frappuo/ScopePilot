@@ -16,9 +16,11 @@ import pytest
 from fastapi.testclient import TestClient
 from google.genai import errors
 from PIL import Image
+from pydantic import ValidationError
 
 from app.config import Settings, get_settings
 from app.main import app
+from app.schemas.analysis import MAX_STORED_ANALYSIS_BYTES, Analysis, StoredAnalysis
 from app.services import gemini, images, logbook
 from app.services.auth import AuthenticatedUser, AuthError
 from app.services.errors import AnalysisError
@@ -39,6 +41,7 @@ RESULT = {
 }
 NOT_FOUND = {"detail": "Experiment not found."}
 UNAVAILABLE = {"detail": "Logbook is temporarily unavailable. Please try again."}
+DAILY_LIMIT = {"detail": "Daily AI request limit reached for your account. Try again after 00:00 UTC."}
 
 
 def now():
@@ -67,6 +70,8 @@ class FakeSupabase:
         self.waits: list[float] = []  # Seconds logbook._wait was asked to sleep.
         self.get_body: bytes | None = None  # Raw 200 body for the experiment GET; None filters rows.
         self.list_extra: list[dict] = []  # Rows appended to every list response.
+        self.usage: dict[tuple[str, str], int] = {}  # usage_daily: (user_id, UTC date) -> gemini_calls.
+        self.usage_body: bytes | None = None  # Raw 200 body for the usage_daily GET; None filters rows.
         self.signed = 0
 
     def add_draft(self, user_id, expires_in=timedelta(hours=1), created_at=None, **fields):
@@ -217,6 +222,8 @@ class FakeSupabase:
         """Names the request the way logbook.py does, for `fail` and `hooks`."""
         if path.startswith("/rest/v1/rpc/"):
             return path.removeprefix("/rest/v1/rpc/")
+        if path == "/rest/v1/usage_daily":
+            return "usage"
         if path != "/rest/v1/experiments":
             return None
         if method == "GET":
@@ -248,8 +255,23 @@ class FakeSupabase:
             self.hooks.pop(op)()
 
         if path == "/rest/v1/rpc/consume_gemini_call":
-            return self._failure("rpc", request) or httpx.Response(
-                200, content=self.quota_body, headers={"content-type": "application/json"})
+            failure = self._failure("rpc", request)
+            if failure:
+                return failure
+            if self.quota_body == b"true":  # The unit was taken: count it as the SQL function does.
+                key = (body["p_user"], now().date().isoformat())
+                self.usage[key] = self.usage.get(key, 0) + 1
+            return httpx.Response(200, content=self.quota_body, headers={"content-type": "application/json"})
+        if op == "usage":
+            failure = self._failure("usage", request)
+            if failure:
+                return failure
+            if self.usage_body is not None:
+                return httpx.Response(200, content=self.usage_body)
+            assert method == "GET" and params["select"] == "user_id,gemini_calls"
+            found = [{"user_id": user, "gemini_calls": calls} for (user, day), calls in self.usage.items()
+                     if params["user_id"] == f"eq.{user}" and params["day"] == f"eq.{day}"]
+            return httpx.Response(200, json=found)
         if path == "/rest/v1/rpc/create_draft":
             return self._create_draft(request, body)
         if path == "/rest/v1/rpc/update_experiment":
@@ -421,7 +443,7 @@ def assert_scoped(requests, user_id, other_id):
         if path == "/rest/v1/rpc/create_draft":
             assert body["p_user"] == user_id
             assert body["p_image_path"].startswith(prefix) and body["p_thumb_path"].startswith(prefix)
-        elif path == "/rest/v1/experiments":
+        elif path in ("/rest/v1/experiments", "/rest/v1/usage_daily"):
             assert request.url.params["user_id"] == f"eq.{user_id}"
         elif path in ("/rest/v1/rpc/consume_gemini_call", "/rest/v1/rpc/update_experiment",
                       "/rest/v1/rpc/discard_draft"):
@@ -554,7 +576,7 @@ def test_per_user_daily_cap(client, fake, sdk):
     fake.quota_body = b"false"
     response = create(client)
     assert response.status_code == 429
-    assert response.json() == {"detail": "Daily analysis limit reached for your account. Try again after 00:00 UTC."}
+    assert response.json() == DAILY_LIMIT
     assert 0 < int(response.headers["retry-after"]) <= 86400
     assert sdk.call_count == 0
     assert fake.by("POST", "/storage/") == [] and fake.rows == {}
@@ -616,6 +638,62 @@ def test_gemini_failure_stores_nothing(client, fake, sdk, break_gemini, status):
     assert fake.by("POST", "/storage/") == []
     assert fake.inserts() == []
     assert fake.objects == {} and fake.rows == {}
+
+
+def analysis_of_size(total_bytes, base):
+    """base with observations padded so that its compact JSON is exactly total_bytes in UTF-8."""
+    analysis = {**base, "observations": []}
+
+    def size():
+        return len(Analysis(**analysis).model_dump_json().encode("utf-8"))
+
+    while size() + 1003 <= total_bytes:  # A 1000-char item adds 1000 + 2 quotes + 1 comma.
+        analysis["observations"].append("o" * 1000)
+    analysis["observations"].append("o" * (total_bytes - size() - 3))
+    assert size() == total_bytes
+    return analysis
+
+
+OVERSIZE_MARKER = "marker-7f3c"
+MARKED = {**RESULT, "probable_specimen": f"Possible {OVERSIZE_MARKER} specimen"}
+
+
+@pytest.mark.parametrize("analysis", [
+    analysis_of_size(MAX_STORED_ANALYSIS_BYTES + 1, MARKED),
+    {**MARKED, "observations": ["Rectangular cells"] * 41},
+    {**MARKED, "explanation": "x" * 6001},
+], ids=["total_size", "41_observations", "long_explanation"])
+def test_create_rejects_oversized_analysis(client, fake, sdk, caplog, analysis):
+    sdk.return_value = SimpleNamespace(text=json.dumps(analysis))
+    with caplog.at_level(logging.DEBUG):
+        response = create(client)
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Gemini returned an invalid or empty analysis. Please try again."}
+    assert sdk.call_count == 1 and len(fake.by("POST", "/rest/v1/rpc/consume_gemini_call")) == 1
+    assert fake.by("POST", "/storage/") == [] and fake.by("DELETE", "/storage/") == []
+    assert fake.inserts() == [] and fake.discards() == []
+    assert fake.objects == {} and fake.rows == {}
+    assert "Logbook analysis rejected reason=too_long" in caplog.text
+    assert OVERSIZE_MARKER not in caplog.text and USER_A not in caplog.text
+
+
+def test_analysis_at_cap_is_stored_unchanged(client, fake, sdk):
+    analysis = analysis_of_size(MAX_STORED_ANALYSIS_BYTES, RESULT)
+    sdk.return_value = SimpleNamespace(text=json.dumps(analysis))
+    response = create(client)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["analysis"] == analysis
+    assert fake.rows[body["id"]]["analysis"] == analysis
+    assert client.get(f"/v1/experiments/{body['id']}", headers=auth()).json()["analysis"] == analysis
+
+
+def test_stored_analysis_cap_counts_utf8_bytes():
+    analysis = {**RESULT, "observations": ["é" * 1000] * 17}
+    as_json = Analysis(**analysis).model_dump_json()
+    assert len(as_json) < MAX_STORED_ANALYSIS_BYTES < len(as_json.encode("utf-8"))
+    with pytest.raises(ValidationError, match="too large to store"):
+        StoredAnalysis.model_validate(analysis)
 
 
 @pytest.mark.parametrize("failure", [500, "transport"])
@@ -1321,6 +1399,8 @@ def test_new_routes_need_bearer(client, fake):
     assert client.get("/v1/experiments").status_code == 401
     assert client.patch(f"/v1/experiments/{experiment_id}", json={"title": "x"}).status_code == 401
     assert client.delete(f"/v1/experiments/{experiment_id}").status_code == 401
+    assert client.post(f"/v1/experiments/{experiment_id}/ask", json={"question": "Why?"}).status_code == 401
+    assert client.post(f"/v1/experiments/{experiment_id}/quiz").status_code == 401
     assert fake.requests == []
 
 
@@ -1343,6 +1423,434 @@ def test_list_patch_delete_never_log_ids_or_urls(client, fake, caplog):
     assert page["items"][0]["thumb_url"]
     for private in (SUPABASE_URL, USER_A, experiment_id, page["items"][0]["thumb_url"], "token="):
         assert private not in caplog.text
+
+
+# --- experiment ask and quiz ---------------------------------------------------------
+
+
+STORED_MARKER = "Stored marker-a91e"
+STORED = {**RESULT, "probable_specimen": f"{STORED_MARKER} specimen"}
+CLIENT_MARKER = "Client marker-77b0"
+QUESTION = "Why are the cells rectangular?"
+ANSWER = "Plant cells have rigid walls."
+QUIZ = {"questions": [
+    {"question": f"Question {n}?", "options": ["Cell wall", "Nucleus", "Vacuole", "Chloroplast"],
+     "correct_answer": "Cell wall", "explanation": "Walls outline each cell."}
+    for n in (1, 2, 3)
+]}
+ACTIONS = ("ask", "quiz")
+TOO_LONG = {"detail": "This experiment's analysis is too long for follow-up questions."}
+
+
+def follow_up(client, action, experiment_id, user="A", question=QUESTION, **kwargs):
+    path = f"/v1/experiments/{experiment_id}/{action}"
+    if action == "ask":
+        kwargs.setdefault("json", {"question": question})
+    return client.post(path, headers=kwargs.pop("headers", auth(user)), **kwargs)
+
+
+def quota_calls(fake):
+    return fake.by("POST", "/rest/v1/rpc/consume_gemini_call")
+
+
+@pytest.fixture
+def answers(sdk):
+    """The mocked SDK answers ask with ANSWER and quiz with QUIZ, told apart by the system prompt."""
+    def respond(*, model, contents, config):
+        if config.system_instruction == gemini.QUIZ_PROMPT:
+            return SimpleNamespace(text=json.dumps(QUIZ))
+        assert config.system_instruction == gemini.ASK_PROMPT
+        return SimpleNamespace(text=ANSWER)
+
+    sdk.side_effect = respond
+    return sdk
+
+
+def test_user_daily_gemini_limit_default():
+    assert Settings.model_fields["user_daily_gemini_limit"].default == 40
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("add", ["add_draft", "add_saved"])
+def test_follow_up_on_own_experiment_uses_stored_analysis(client, fake, answers, action, add):
+    experiment_id = getattr(fake, add)(USER_A, analysis=STORED)
+    fake.store_objects(experiment_id)
+    rows, objects = json.loads(json.dumps(fake.rows)), dict(fake.objects)
+    response = follow_up(client, action, experiment_id)
+    assert response.status_code == 200
+    assert response.json() == ({"answer": ANSWER} if action == "ask" else QUIZ)
+
+    (quota,) = quota_calls(fake)
+    assert json.loads(quota.content) == {"p_user": USER_A, "p_limit": settings().user_daily_gemini_limit}
+    assert answers.call_count == 1
+    call = answers.call_args.kwargs
+    assert call["config"].system_instruction == (gemini.ASK_PROMPT if action == "ask" else gemini.QUIZ_PROMPT)
+    assert StoredAnalysis.model_validate(STORED).model_dump_json() in call["contents"]
+    assert (QUESTION in call["contents"]) == (action == "ask")
+
+    # Nothing is persisted: one read and one quota call, rows and objects unchanged.
+    assert [(r.method, r.url.path) for r in fake.requests] == [
+        ("GET", "/rest/v1/experiments"), ("POST", "/rest/v1/rpc/consume_gemini_call")]
+    assert fake.rows == rows and fake.objects == objects
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_quiz_ignores_a_client_supplied_analysis(client, fake, answers):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    client_analysis = {**RESULT, "probable_specimen": CLIENT_MARKER}
+    response = follow_up(client, "quiz", experiment_id, json={"analysis": client_analysis})
+    assert response.status_code == 200
+    contents = answers.call_args.kwargs["contents"]
+    assert STORED_MARKER in contents and CLIENT_MARKER not in contents
+
+
+def test_ask_rejects_a_client_supplied_analysis(client, fake, answers):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    response = follow_up(client, "ask", experiment_id,
+                         json={"question": QUESTION, "analysis": {**RESULT, "probable_specimen": CLIENT_MARKER}})
+    assert response.status_code == 422
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("body", [{"question": ""}, {"question": "   "}, {"question": "x" * 501}, {}, {"question": None}])
+def test_ask_invalid_question_is_422_without_supabase(client, fake, answers, body):
+    response = follow_up(client, "ask", fake.add_draft(USER_A), json=body)
+    assert response.status_code == 422
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+def test_ask_accepts_a_500_char_question(client, fake, answers):
+    response = follow_up(client, "ask", fake.add_draft(USER_A), question="x" * 500)
+    assert response.status_code == 200
+    assert "x" * 500 in answers.call_args.kwargs["contents"]
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_on_other_users_experiment_is_404(client, fake, answers, action):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    stolen = follow_up(client, action, experiment_id, user="B")
+    missing = follow_up(client, action, uuid.uuid4(), user="B")
+    assert stolen.status_code == missing.status_code == 404
+    assert stolen.json() == missing.json() == NOT_FOUND
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+    assert_scoped(fake.requests, USER_B, USER_A)
+    assert STORED_MARKER not in stolen.text
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_non_uuid_is_404_without_supabase(client, fake, answers, action):
+    for bad in ("not-a-uuid", "1"):
+        response = follow_up(client, action, bad)
+        assert response.status_code == 404 and response.json() == NOT_FOUND
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_on_expired_draft_is_404(client, fake, answers, action):
+    experiment_id = fake.add_draft(USER_A, expires_in=timedelta(seconds=-1))
+    response = follow_up(client, action, experiment_id)
+    assert response.status_code == 404 and response.json() == NOT_FOUND
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("tamper", ["foreign_path", "dotdot_path", "foreign_user"])
+def test_follow_up_refuses_foreign_rows(client, fake, answers, action, tamper):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    if tamper == "foreign_user":
+        fake.get_body = json.dumps([{**fake.rows[experiment_id], "user_id": USER_B}]).encode()
+    else:
+        fake.rows[experiment_id]["image_path"] = (
+            f"{USER_B}/x/image.jpg" if tamper == "foreign_path" else f"{USER_A}/../{USER_B}/x/image.jpg")
+    response = follow_up(client, action, experiment_id)
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+    assert fake.by("POST", "/storage/v1/object/sign/") == []
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_unparsable_stored_analysis_is_503(client, fake, answers, action):
+    broken = {key: value for key, value in STORED.items() if key != "limitations"}
+    response = follow_up(client, action, fake.add_draft(USER_A, analysis=broken))
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("analysis", [
+    analysis_of_size(MAX_STORED_ANALYSIS_BYTES + 1, STORED),
+    {**STORED, "observations": ["Rectangular cells"] * 41},
+], ids=["total_size", "41_observations"])
+def test_follow_up_over_cap_stored_analysis_is_422(client, fake, answers, caplog, action, analysis):
+    experiment_id = fake.add_draft(USER_A, analysis=analysis)
+    with caplog.at_level(logging.DEBUG):
+        response = follow_up(client, action, experiment_id)
+    assert response.status_code == 422 and response.json() == TOO_LONG
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+    assert "Logbook stored analysis rejected reason=too_long" in caplog.text
+    for private in (STORED_MARKER, USER_A, experiment_id):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_analysis_at_cap_is_accepted(client, fake, answers, action):
+    analysis = analysis_of_size(MAX_STORED_ANALYSIS_BYTES, STORED)
+    response = follow_up(client, action, fake.add_draft(USER_A, analysis=analysis))
+    assert response.status_code == 200
+    assert StoredAnalysis.model_validate(analysis).model_dump_json() in answers.call_args.kwargs["contents"]
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_per_user_daily_cap(client, fake, answers, action):
+    fake.quota_body = b"false"
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 429
+    assert response.json() == DAILY_LIMIT
+    assert 0 < int(response.headers["retry-after"]) <= 86400
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("quota_body", [b"null", b'"true"', b"[true]", b"{}", b"1", b"not json"])
+def test_follow_up_quota_fails_closed_on_non_boolean(client, fake, answers, action, quota_body):
+    fake.quota_body = quota_body
+    assert follow_up(client, action, fake.add_draft(USER_A)).status_code == 429
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_quota_rpc_failure_is_503(client, fake, answers, action):
+    fake.fail["rpc"] = 500
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("failure,status", [
+    (errors.ServerError(500, {"error": {"message": "provider detail"}}), 502),
+    (httpx.ReadTimeout("provider detail"), 504),
+], ids=["server_error", "timeout"])
+def test_follow_up_gemini_failure_still_costs_quota(client, fake, sdk, action, failure, status):
+    sdk.side_effect = failure
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == status
+    assert "provider detail" not in response.text
+    assert len(quota_calls(fake)) == 1
+    assert sdk.call_count == 1
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_global_daily_cap_is_503_and_costs_quota(client, fake, answers, action):
+    exhaust_global_cap()
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 503
+    assert response.json()["detail"].startswith("Daily Gemini request limit for this server")
+    assert 0 < int(response.headers["retry-after"]) <= 86400
+    assert len(quota_calls(fake)) == 1
+    assert answers.call_count == 0
+
+
+def test_follow_up_body_limit_is_the_json_limit(client, fake, answers):
+    use_settings(max_json_body_bytes=100)
+    response = follow_up(client, "ask", uuid.uuid4(), json={"question": "x" * 200})
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body exceeds the 100-byte limit."}
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_needs_app_token_when_set(client, fake, answers, action):
+    use_settings(app_token="dummy-app-token-for-tests")
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 401 and response.json() == {"detail": "Unauthorized client."}
+    accepted = follow_up(client, action, fake.add_draft(USER_A),
+                         headers={**auth(), "X-ScopePilot-Token": "dummy-app-token-for-tests"})
+    assert accepted.status_code == 200
+    assert len(quota_calls(fake)) == 1
+
+
+def test_quiz_without_a_body(client, fake, answers):
+    response = client.post(f"/v1/experiments/{fake.add_draft(USER_A)}/quiz", headers=auth())
+    assert response.status_code == 200 and response.json() == QUIZ
+
+
+def test_follow_up_bearer_rejection_logs_templated_paths(client, fake, caplog):
+    experiment_id = str(uuid.uuid4())
+    with caplog.at_level(logging.DEBUG):
+        client.post(f"/v1/experiments/{experiment_id}/ask", json={"question": QUESTION})
+        client.post(f"/v1/experiments/{experiment_id}/quiz")
+    app_lines = [r.getMessage() for r in caplog.records if r.name.startswith("app")]
+    assert "Request rejected rule=bearer path=/v1/experiments/{id}/ask reason=missing" in app_lines
+    assert "Request rejected rule=bearer path=/v1/experiments/{id}/quiz reason=missing" in app_lines
+    assert not any(experiment_id in line for line in app_lines)
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_never_logs_private_values(client, fake, sdk, caplog, action):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    responses = {}
+
+    def respond(*, model, contents, config):
+        return SimpleNamespace(text=json.dumps(QUIZ) if action == "quiz" else ANSWER)
+
+    with caplog.at_level(logging.DEBUG):
+        sdk.side_effect = respond
+        responses["ok"] = follow_up(client, action, experiment_id)
+        responses["other_user"] = follow_up(client, action, experiment_id, user="B")
+        responses["too_long"] = follow_up(client, action, fake.add_draft(
+            USER_A, analysis={**STORED, "observations": ["Rectangular cells"] * 41}))
+        sdk.side_effect = errors.ServerError(500, {"error": {"message": "provider detail"}})
+        responses["gemini"] = follow_up(client, action, experiment_id)
+        fake.quota_body = b"false"
+        responses["quota"] = follow_up(client, action, experiment_id)
+    assert {name: r.status_code for name, r in responses.items()} == {
+        "ok": 200, "other_user": 404, "too_long": 422, "gemini": 502, "quota": 429}
+    for private in (STORED_MARKER, SUPABASE_URL, USER_A, USER_B, experiment_id, QUESTION):
+        assert private not in caplog.text
+
+
+# --- /v1/me usage --------------------------------------------------------------------
+
+
+def freeze(monkeypatch, utc, local):
+    """Freeze logbook's clock: now(tz) is the instant utc, now() is a naive local time on another date."""
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return local if tz is None else utc.astimezone(tz)
+
+    monkeypatch.setattr(logbook, "datetime", Frozen)
+
+
+def me(client, user="A"):
+    response = client.get("/v1/me", headers=auth(user))
+    assert response.status_code == 200
+    return response.json()["usage"]
+
+
+def usage_requests(fake):
+    return fake.by("GET", "/rest/v1/usage_daily")
+
+
+def test_me_usage_without_a_row(client, fake):
+    limit = settings().user_daily_gemini_limit
+    assert {k: v for k, v in me(client).items() if k != "resets_at"} == {
+        "used_today": 0, "daily_limit": limit, "remaining": limit}
+    (request,) = fake.requests
+    assert request.method == "GET" and request.url.path == "/rest/v1/usage_daily"
+    assert dict(request.url.params) == {"select": "user_id,gemini_calls", "user_id": f"eq.{USER_A}",
+                                        "day": f"eq.{now().date().isoformat()}"}
+    assert "authorization" not in request.headers and "token-A" not in str(request.headers)
+
+
+def test_me_usage_request_uses_the_short_timeout(client, fake):
+    me(client)
+    (request,) = usage_requests(fake)
+    assert request.extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"),
+                                                          logbook.USAGE_TIMEOUT_SECONDS)
+    assert logbook.USAGE_TIMEOUT_SECONDS == 3
+
+
+@pytest.mark.parametrize("used,limit,remaining", [(7, 10, 3), (10, 10, 0), (45, 10, 0)])
+def test_me_usage_counts(client, fake, used, limit, remaining):
+    use_settings(user_daily_gemini_limit=limit)
+    fake.usage[(USER_A, now().date().isoformat())] = used
+    fake.usage[(USER_B, now().date().isoformat())] = 1  # Another user's row is never read.
+    fake.usage[(USER_A, (now().date() - timedelta(days=1)).isoformat())] = 9  # Nor yesterday's.
+    usage = me(client)
+    assert (usage["used_today"], usage["daily_limit"], usage["remaining"]) == (used, limit, remaining)
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+@pytest.mark.parametrize("utc,local,day,resets_at", [
+    (datetime(2026, 10, 12, 23, 59, 30, tzinfo=timezone.utc), datetime(2026, 10, 13, 4, 59, 30),
+     "2026-10-12", datetime(2026, 10, 13, tzinfo=timezone.utc)),
+    (datetime(2026, 10, 13, 0, 0, 30, tzinfo=timezone.utc), datetime(2026, 10, 12, 19, 0, 30),
+     "2026-10-13", datetime(2026, 10, 14, tzinfo=timezone.utc)),
+    (datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc), datetime(2026, 10, 11, 12, 0),
+     "2026-10-12", datetime(2026, 10, 13, tzinfo=timezone.utc)),
+], ids=["before_midnight", "after_midnight", "midday"])
+def test_me_usage_uses_the_utc_day(client, fake, monkeypatch, utc, local, day, resets_at):
+    freeze(monkeypatch, utc, local)
+    fake.usage[(USER_A, day)] = 4
+    usage = me(client)
+    assert usage["used_today"] == 4
+    (request,) = usage_requests(fake)
+    assert request.url.params["day"] == f"eq.{day}"
+    parsed = datetime.fromisoformat(usage["resets_at"])
+    assert parsed == resets_at and parsed.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize("body", [
+    json.dumps([{"user_id": USER_B, "gemini_calls": 1}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": True}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": -1}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": "3"}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": 1.5}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": None}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": 1}] * 2).encode(),
+    b"{}",
+    b"[1]",
+    b"not json",
+], ids=["foreign_user", "bool", "negative", "string", "float", "null", "two_rows", "object", "not_a_row", "not_json"])
+def test_me_usage_bad_response_is_null(client, fake, caplog, body):
+    fake.usage_body = body
+    with caplog.at_level(logging.DEBUG):
+        assert me(client) is None
+    assert "Logbook usage read failed op=usage status=bad_response" in caplog.text
+    for private in (USER_A, USER_B, SUPABASE_URL, SECRET):
+        assert private not in caplog.text
+
+
+def raise_timeout():
+    raise httpx.ReadTimeout("fake timeout")
+
+
+@pytest.mark.parametrize("failure", [500, "transport", "timeout"])
+def test_me_usage_read_failure_is_200_with_null_usage(client, fake, caplog, failure):
+    if failure == "timeout":
+        fake.hooks["usage"] = raise_timeout
+    else:
+        fake.fail["usage"] = failure
+    with caplog.at_level(logging.DEBUG):
+        response = client.get("/v1/me", headers=auth())
+    assert response.status_code == 200
+    assert response.json() == {"user_id": USER_A, "email": None, "usage": None}
+    assert "Logbook usage read failed op=usage status=request" in caplog.text
+    for private in (USER_A, SUPABASE_URL, SECRET):
+        assert private not in caplog.text
+
+
+def test_me_usage_counts_experiment_ask_and_quiz(client, fake, sdk):
+    sdk.side_effect = lambda *, model, contents, config: SimpleNamespace(
+        text=json.dumps(QUIZ) if config.system_instruction == gemini.QUIZ_PROMPT else ANSWER)
+    limit = settings().user_daily_gemini_limit
+    experiment_id = fake.add_draft(USER_A)
+    assert follow_up(client, "ask", experiment_id).status_code == 200
+    usage = me(client)
+    assert (usage["used_today"], usage["remaining"]) == (1, limit - 1)
+    assert follow_up(client, "quiz", experiment_id).status_code == 200
+    assert me(client)["used_today"] == 2
+
+    fake.requests.clear()
+    assert me(client, user="B")["used_today"] == 0
+    assert_scoped(fake.requests, USER_B, USER_A)
+
+
+def test_me_without_valid_bearer_makes_no_supabase_request(client, fake):
+    assert client.get("/v1/me").status_code == 401
+    assert client.get("/v1/me", headers=auth("nobody")).status_code == 401
+    assert fake.requests == []
 
 
 # --- display copies ------------------------------------------------------------------
@@ -1463,6 +1971,7 @@ def test_not_configured(client, fake, sdk):
     response = client.get(f"/v1/experiments/{uuid.uuid4()}", headers=auth())
     assert response.status_code == 503
     assert response.json() == {"detail": "Logbook not configured."}
+    assert client.get("/v1/me", headers=auth()).json() == {"detail": "Logbook not configured."}
     assert fake.requests == []
     assert sdk.call_count == 0
 

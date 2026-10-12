@@ -23,6 +23,7 @@ EXEMPT_PATHS = frozenset({"/health"})
 KNOWN_PATHS = frozenset({"/health", "/analyze", "/ask", "/quiz", "/v1/me", "/v1/experiments"})
 IMAGE_UPLOAD_PATHS = frozenset({"/analyze", "/v1/experiments"})
 EXPERIMENT_PATH_PREFIX = "/v1/experiments/"
+EXPERIMENT_ACTIONS = frozenset({"ask", "quiz"})
 TOKEN_HEADER = b"x-scopepilot-token"
 MAX_BEARER_TOKEN_BYTES = 8 * 1024
 INVALID_SESSION = {"detail": "Session expired or invalid."}
@@ -61,8 +62,13 @@ def log_path(path: str) -> str:
     """A path safe to log: known paths as-is, experiment IDs templated, anything else "other"."""
     if path in KNOWN_PATHS:
         return path
+    if not path.startswith(EXPERIMENT_PATH_PREFIX):
+        return "other"
     # A template, so experiment IDs never reach the logs.
-    return "/v1/experiments/{id}" if path.startswith(EXPERIMENT_PATH_PREFIX) else "other"
+    segments = path.removeprefix(EXPERIMENT_PATH_PREFIX).split("/")
+    if len(segments) == 2 and segments[0] and segments[1] in EXPERIMENT_ACTIONS:
+        return f"/v1/experiments/{{id}}/{segments[1]}"
+    return "/v1/experiments/{id}"
 
 
 def _log_path(scope: Scope) -> str:

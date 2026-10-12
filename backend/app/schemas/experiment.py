@@ -5,6 +5,7 @@ import unicodedata
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 
 from app.schemas.analysis import Analysis
+from app.schemas.ask import Question
 
 
 class Experiment(BaseModel):
@@ -85,3 +86,11 @@ class ExperimentUpdate(BaseModel):
         if self.title is None and self.notes is None and self.status is None:
             raise ValueError("Nothing to update.")
         return self
+
+
+class ExperimentAskRequest(BaseModel):
+    """Body of POST /v1/experiments/{id}/ask. The analysis comes from the stored experiment, never the client."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: Question

@@ -3,6 +3,37 @@
 Dated log, newest first. Current status, planned features, and known issues
 live in `docs/HANDOFF.md`.
 
+## Logbook PR 5 (2026-10-12)
+
+- PR 3 (create/read, #11) and PR 4 (list, edit/save, delete, migration 0002,
+  #14) are merged.
+- PR 5: `POST /v1/experiments/{id}/ask` and
+  `/quiz` answer from the experiment's stored analysis, never a client-supplied
+  one, and store nothing. 404 for another user's, a missing or an expired
+  experiment; 422 for a stored analysis over the caps; none of these costs
+  quota.
+- Stored analyses are capped (`StoredAnalysis`: the `/ask` input caps plus
+  32 KiB in total) at create (502) and at ask/quiz (422).
+- One per-user daily quota (`USER_DAILY_GEMINI_LIMIT`, default now 40) covers
+  create, ask and quiz; 429 "Daily AI request limit reached for your account."
+- `GET /v1/me` reports `usage` (used, limit, remaining, next UTC midnight),
+  read with a 3 s timeout; `usage` is null if the read fails.
+- Logs template `/v1/experiments/{id}/ask` and `/quiz`; IDs never appear.
+- Local tooling configuration files are no longer tracked (kept locally,
+  excluded through `.git/info/exclude`).
+- Backend suite: 518 passed, 1 skipped (httptools not installed), all mocked.
+  Not verified live: ask/quiz and the `usage_daily` read against real Supabase
+  and Gemini.
+- Legacy `/analyze`, `/ask` and `/quiz` are unchanged: global limits only, and
+  `/ask`/`/quiz` still trust the client's analysis until PR 7.
+
+### Next steps
+
+1. PR 6: account deletion (rows, `usage_daily` and everything under the user's
+   storage folder; its own longer statement timeout).
+2. PR 7: legacy switch.
+3. Then the app's login and experiments screens.
+
 ## Logbook PRs 1-2 Merged (2026-10-08)
 
 - PR 1 (scaffolding: Supabase schema, settings, setup notes) and PR 2
@@ -54,8 +85,7 @@ live in `docs/HANDOFF.md`.
   keyboard scrolling was not separately reported.
 - Not verified: Gemini's handling of 16-bit PNG; memory use on Render.
 - Documentation synced to the code. `architecture.md` and `project_context.md`
-  were merged into `docs/HANDOFF.md` and removed; `agents.md` now points to
-  `CLAUDE.md`.
+  were merged into `docs/HANDOFF.md` and removed.
 
 ## Educational Quiz Verification (2026-09-08)
 

@@ -1,9 +1,0 @@
-﻿{
-  "permissions": {
-    "deny": [
-      "Read(./backend/.env)",
-      "Read(./frontend/.env)"
-    ]
-  },
-  "includeCoAuthoredBy": false
-}

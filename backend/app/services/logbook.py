@@ -19,15 +19,20 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.schemas.analysis import Analysis, StoredAnalysis
+from app.schemas.ask import AskResponse
 from app.schemas.experiment import Experiment, ExperimentPage, ExperimentSummary, ExperimentUpdate
+from app.schemas.me import DailyUsage
+from app.schemas.quiz import QuizResponse
 from app.services.errors import AnalysisError
-from app.services.gemini import PROMPT_VERSION, analyze_image_with_model
+from app.services.gemini import PROMPT_VERSION, analyze_image_with_model, answer_question, generate_quiz
 from app.services.images import make_display_copies, prepare_image
 
 logger = logging.getLogger(__name__)
 
 SIGNED_URL_SECONDS = 600
 SUPABASE_TIMEOUT_SECONDS = 10  # Keep above the service_role statement_timeout (5 s, migration 0002).
+USAGE_TIMEOUT_SECONDS = 3  # The usage read is read-only and must not hold /v1/me, the session check.
 CREATE_DEADLINE_SECONDS = SUPABASE_TIMEOUT_SECONDS - 2  # create_draft writes nothing after this.
 # Cleanup waits this long past the deadline, so the database clock may lag this host's by up to
 # about this much (minus the discard call's latency) without a late create slipping through.
@@ -47,7 +52,9 @@ TOO_MANY_DRAFTS = "Too many unsaved drafts. Save or discard one first."
 TOO_MANY_SAVED = "Too many saved experiments. Delete one first."
 TITLE_REQUIRED = "A title is required to save."
 INVALID_CURSOR = "Invalid cursor."
-DAILY_LIMIT = "Daily analysis limit reached for your account. Try again after 00:00 UTC."
+DAILY_LIMIT = "Daily AI request limit reached for your account. Try again after 00:00 UTC."
+INVALID_ANALYSIS = "Gemini returned an invalid or empty analysis. Please try again."
+ANALYSIS_TOO_LONG = "This experiment's analysis is too long for follow-up questions."
 
 # Test hooks: tests install an httpx.MockTransport (None uses the real network) and replace
 # _wait so that cleanup does not really sleep.
@@ -141,6 +148,44 @@ def consume_gemini_call(user_id: str, settings: Settings) -> bool:
     response = _request("consume_quota", settings, "POST", "/rest/v1/rpc/consume_gemini_call",
                         json={"p_user": user_id, "p_limit": settings.user_daily_gemini_limit})
     return _json(response) is True
+
+
+def _charge_quota(user_id: str, settings: Settings) -> None:
+    """Take one unit of the user's daily quota, or raise 429 with Retry-After until 00:00 UTC."""
+    if not consume_gemini_call(user_id, settings):
+        retry_after = _seconds_until_utc_midnight(datetime.now(timezone.utc))
+        raise AnalysisError(429, DAILY_LIMIT, headers={"Retry-After": str(retry_after)})
+
+
+def get_daily_usage(user_id: str, settings: Settings) -> DailyUsage | None:
+    """The user's quota use for the current UTC day, or None if it cannot be read. Never raises.
+
+    No row means nothing used yet. The backend clock picks the day, while consume_gemini_call
+    uses the database clock, so the two can disagree for a few seconds around 00:00 UTC.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        rows = _json(_request("usage", settings, "GET", "/rest/v1/usage_daily", params={
+            "select": "user_id,gemini_calls",
+            "user_id": f"eq.{user_id}",
+            "day": f"eq.{now.date().isoformat()}",
+        }, timeout=USAGE_TIMEOUT_SECONDS))
+    except Exception:
+        # /v1/me is the session check: a failed read leaves usage unknown, never fails the request.
+        logger.warning("Logbook usage read failed op=usage status=request")
+        return None
+    if rows == []:
+        used = 0
+    elif isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict) \
+            and rows[0].get("user_id") == user_id and type(rows[0].get("gemini_calls")) is int \
+            and rows[0]["gemini_calls"] >= 0:
+        used = rows[0]["gemini_calls"]
+    else:
+        logger.warning("Logbook usage read failed op=usage status=bad_response")
+        return None
+    limit = settings.user_daily_gemini_limit
+    return DailyUsage(used_today=used, daily_limit=limit, remaining=max(0, limit - used),
+                      resets_at=_next_utc_midnight(now))
 
 
 def upload_object(user_id: str, path: str, data: bytes, settings: Settings) -> None:
@@ -276,9 +321,12 @@ def _experiment(user_id: str, row: dict[str, Any], settings: Settings) -> Experi
         raise _unavailable("parse_row", "bad_response") from None
 
 
+def _next_utc_midnight(now: datetime) -> datetime:
+    return datetime.combine(now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+
 def _seconds_until_utc_midnight(now: datetime) -> int:
-    midnight = datetime.combine(now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc)
-    return max(1, math.ceil((midnight - now).total_seconds()))
+    return max(1, math.ceil((_next_utc_midnight(now) - now).total_seconds()))
 
 
 def _cleanup(user_id: str, paths: list[str], settings: Settings, op: str) -> None:
@@ -308,23 +356,29 @@ def _discard_quietly(user_id: str, experiment_id: str, deadline: datetime, setti
 def create_experiment(user_id: str, data: bytes, content_type: str | None, settings: Settings) -> Experiment:
     """Analyze an upload and store it as a draft.
 
-    Order: draft cap, image validation, display copies, quota, Gemini, uploads, insert.
-    A rejected image, or one whose display copies cannot be made (busy, too large),
-    costs no quota. If Gemini fails, nothing is stored. If an upload fails, the objects
-    already uploaded are deleted. create_draft writes nothing after a deadline 8 s out. If
-    the insert fails, cleanup waits for that deadline, removes the row with discard_draft
-    (the insert may have committed before its response was lost), then the objects; if
-    the discard fails, the objects are kept so a surviving row never loses its images.
-    A draft_limit, late or invalid_arguments result means no row, so only objects go.
+    Order: draft cap, image validation, display copies, quota, Gemini, stored-analysis cap,
+    uploads, insert. A rejected image, or one whose display copies cannot be made (busy,
+    too large), costs no quota. If Gemini fails, or its analysis exceeds the StoredAnalysis
+    caps (field caps, 32 KiB in total), nothing is stored and the quota unit stays spent.
+    If an upload fails, the objects already uploaded are deleted. create_draft writes
+    nothing after a deadline 8 s out. If the insert fails, cleanup waits for that deadline,
+    removes the row with discard_draft (the insert may have committed before its response
+    was lost), then the objects; if the discard fails, the objects are kept so a surviving
+    row never loses its images. A draft_limit, late or invalid_arguments result means no
+    row, so only objects go.
     """
     if count_live_drafts(user_id, settings) >= settings.max_drafts_per_user:
         raise AnalysisError(409, TOO_MANY_DRAFTS)
     cleaned, mime_type = prepare_image(data, content_type, settings)
     display, thumb = make_display_copies(cleaned, mime_type)
-    if not consume_gemini_call(user_id, settings):
-        retry_after = _seconds_until_utc_midnight(datetime.now(timezone.utc))
-        raise AnalysisError(429, DAILY_LIMIT, headers={"Retry-After": str(retry_after)})
+    _charge_quota(user_id, settings)
     analysis, model = analyze_image_with_model(cleaned, mime_type, settings)
+    try:
+        stored = StoredAnalysis.model_validate(analysis.model_dump())
+    except ValidationError:
+        # No content or ids in the log; "from None" keeps the input values out of tracebacks.
+        logger.warning("Logbook analysis rejected reason=too_long")
+        raise AnalysisError(502, INVALID_ANALYSIS) from None
 
     experiment_id = str(uuid.uuid4())
     image_path, thumb_path = _object_paths(user_id, experiment_id)
@@ -339,7 +393,7 @@ def create_experiment(user_id: str, data: bytes, content_type: str | None, setti
         deadline = datetime.now(timezone.utc) + timedelta(seconds=CREATE_DEADLINE_SECONDS)
         result = insert_experiment(user_id, {
             "id": experiment_id,
-            "analysis": analysis.model_dump(),
+            "analysis": stored.model_dump(),
             "model": model,
             "prompt_version": PROMPT_VERSION,
             "image_path": image_path,
@@ -380,6 +434,44 @@ def read_experiment(user_id: str, experiment_id: str, settings: Settings) -> Exp
     if row is None:
         raise AnalysisError(404, NOT_FOUND)
     return _experiment(user_id, row, settings)
+
+
+def _followup_analysis(user_id: str, experiment_id: str, settings: Settings) -> StoredAnalysis:
+    """The stored analysis of the user's own experiment, with one quota unit charged.
+
+    404 for a non-UUID (before any request), another user's ID, a missing row or an expired
+    draft; 503 for an unparsable stored analysis; 422 if it exceeds the StoredAnalysis caps.
+    None of these costs quota. After the charge, a Gemini failure or the server-wide cap keeps
+    the unit spent, as in create.
+    """
+    canonical = _canonical_id(experiment_id)
+    if canonical is None:
+        raise AnalysisError(404, NOT_FOUND)
+    row = get_experiment(user_id, canonical, settings)
+    if row is None:
+        raise AnalysisError(404, NOT_FOUND)
+    try:
+        analysis = Analysis.model_validate(row.get("analysis"))
+    except ValidationError:
+        raise _unavailable("parse_row", "bad_response") from None
+    try:
+        stored = StoredAnalysis.model_validate(analysis.model_dump())
+    except ValidationError:
+        # No content or ids in the log; "from None" keeps the stored values out of tracebacks.
+        logger.warning("Logbook stored analysis rejected reason=too_long")
+        raise AnalysisError(422, ANALYSIS_TOO_LONG) from None
+    _charge_quota(user_id, settings)
+    return stored
+
+
+def ask_experiment(user_id: str, experiment_id: str, question: str, settings: Settings) -> AskResponse:
+    """Answer a question about the user's own experiment from its stored analysis. Stores nothing."""
+    return answer_question(_followup_analysis(user_id, experiment_id, settings), question, settings)
+
+
+def quiz_experiment(user_id: str, experiment_id: str, settings: Settings) -> QuizResponse:
+    """A quiz on the user's own experiment from its stored analysis. Stores nothing."""
+    return generate_quiz(_followup_analysis(user_id, experiment_id, settings), settings)
 
 
 def _encode_cursor(created_at: datetime, experiment_id: str) -> str:
