@@ -5,13 +5,17 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import Settings, get_settings
 from app.dependencies import current_user
-from app.schemas.experiment import Experiment, ExperimentPage, ExperimentUpdate
+from app.schemas.ask import AskResponse
+from app.schemas.experiment import Experiment, ExperimentAskRequest, ExperimentPage, ExperimentUpdate
+from app.schemas.quiz import QuizResponse
 from app.services.auth import AuthenticatedUser
 from app.services.logbook import (
+    ask_experiment,
     create_experiment,
     delete_experiment,
     list_experiments,
     purge_expired_drafts,
+    quiz_experiment,
     read_experiment,
     update_experiment,
 )
@@ -76,3 +80,22 @@ async def delete(
 ) -> Response:
     await run_in_threadpool(delete_experiment, user.user_id, experiment_id, settings)
     return Response(status_code=204)
+
+
+@router.post("/experiments/{experiment_id}/ask", response_model=AskResponse)
+async def ask(
+    experiment_id: str,
+    body: ExperimentAskRequest,
+    user: Annotated[AuthenticatedUser, Depends(current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AskResponse:
+    return await run_in_threadpool(ask_experiment, user.user_id, experiment_id, body.question, settings)
+
+
+@router.post("/experiments/{experiment_id}/quiz", response_model=QuizResponse)
+async def quiz(
+    experiment_id: str,
+    user: Annotated[AuthenticatedUser, Depends(current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> QuizResponse:
+    return await run_in_threadpool(quiz_experiment, user.user_id, experiment_id, settings)

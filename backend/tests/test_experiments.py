@@ -41,6 +41,7 @@ RESULT = {
 }
 NOT_FOUND = {"detail": "Experiment not found."}
 UNAVAILABLE = {"detail": "Logbook is temporarily unavailable. Please try again."}
+DAILY_LIMIT = {"detail": "Daily AI request limit reached for your account. Try again after 00:00 UTC."}
 
 
 def now():
@@ -556,7 +557,7 @@ def test_per_user_daily_cap(client, fake, sdk):
     fake.quota_body = b"false"
     response = create(client)
     assert response.status_code == 429
-    assert response.json() == {"detail": "Daily analysis limit reached for your account. Try again after 00:00 UTC."}
+    assert response.json() == DAILY_LIMIT
     assert 0 < int(response.headers["retry-after"]) <= 86400
     assert sdk.call_count == 0
     assert fake.by("POST", "/storage/") == [] and fake.rows == {}
@@ -1379,6 +1380,8 @@ def test_new_routes_need_bearer(client, fake):
     assert client.get("/v1/experiments").status_code == 401
     assert client.patch(f"/v1/experiments/{experiment_id}", json={"title": "x"}).status_code == 401
     assert client.delete(f"/v1/experiments/{experiment_id}").status_code == 401
+    assert client.post(f"/v1/experiments/{experiment_id}/ask", json={"question": "Why?"}).status_code == 401
+    assert client.post(f"/v1/experiments/{experiment_id}/quiz").status_code == 401
     assert fake.requests == []
 
 
@@ -1400,6 +1403,300 @@ def test_list_patch_delete_never_log_ids_or_urls(client, fake, caplog):
         delete(client, experiment_id)
     assert page["items"][0]["thumb_url"]
     for private in (SUPABASE_URL, USER_A, experiment_id, page["items"][0]["thumb_url"], "token="):
+        assert private not in caplog.text
+
+
+# --- experiment ask and quiz ---------------------------------------------------------
+
+
+STORED_MARKER = "Stored marker-a91e"
+STORED = {**RESULT, "probable_specimen": f"{STORED_MARKER} specimen"}
+CLIENT_MARKER = "Client marker-77b0"
+QUESTION = "Why are the cells rectangular?"
+ANSWER = "Plant cells have rigid walls."
+QUIZ = {"questions": [
+    {"question": f"Question {n}?", "options": ["Cell wall", "Nucleus", "Vacuole", "Chloroplast"],
+     "correct_answer": "Cell wall", "explanation": "Walls outline each cell."}
+    for n in (1, 2, 3)
+]}
+ACTIONS = ("ask", "quiz")
+TOO_LONG = {"detail": "This experiment's analysis is too long for follow-up questions."}
+
+
+def follow_up(client, action, experiment_id, user="A", question=QUESTION, **kwargs):
+    path = f"/v1/experiments/{experiment_id}/{action}"
+    if action == "ask":
+        kwargs.setdefault("json", {"question": question})
+    return client.post(path, headers=kwargs.pop("headers", auth(user)), **kwargs)
+
+
+def quota_calls(fake):
+    return fake.by("POST", "/rest/v1/rpc/consume_gemini_call")
+
+
+@pytest.fixture
+def answers(sdk):
+    """The mocked SDK answers ask with ANSWER and quiz with QUIZ, told apart by the system prompt."""
+    def respond(*, model, contents, config):
+        if config.system_instruction == gemini.QUIZ_PROMPT:
+            return SimpleNamespace(text=json.dumps(QUIZ))
+        assert config.system_instruction == gemini.ASK_PROMPT
+        return SimpleNamespace(text=ANSWER)
+
+    sdk.side_effect = respond
+    return sdk
+
+
+def test_user_daily_gemini_limit_default():
+    assert Settings.model_fields["user_daily_gemini_limit"].default == 40
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("add", ["add_draft", "add_saved"])
+def test_follow_up_on_own_experiment_uses_stored_analysis(client, fake, answers, action, add):
+    experiment_id = getattr(fake, add)(USER_A, analysis=STORED)
+    fake.store_objects(experiment_id)
+    rows, objects = json.loads(json.dumps(fake.rows)), dict(fake.objects)
+    response = follow_up(client, action, experiment_id)
+    assert response.status_code == 200
+    assert response.json() == ({"answer": ANSWER} if action == "ask" else QUIZ)
+
+    (quota,) = quota_calls(fake)
+    assert json.loads(quota.content) == {"p_user": USER_A, "p_limit": settings().user_daily_gemini_limit}
+    assert answers.call_count == 1
+    call = answers.call_args.kwargs
+    assert call["config"].system_instruction == (gemini.ASK_PROMPT if action == "ask" else gemini.QUIZ_PROMPT)
+    assert StoredAnalysis.model_validate(STORED).model_dump_json() in call["contents"]
+    assert (QUESTION in call["contents"]) == (action == "ask")
+
+    # Nothing is persisted: one read and one quota call, rows and objects unchanged.
+    assert [(r.method, r.url.path) for r in fake.requests] == [
+        ("GET", "/rest/v1/experiments"), ("POST", "/rest/v1/rpc/consume_gemini_call")]
+    assert fake.rows == rows and fake.objects == objects
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_quiz_ignores_a_client_supplied_analysis(client, fake, answers):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    client_analysis = {**RESULT, "probable_specimen": CLIENT_MARKER}
+    response = follow_up(client, "quiz", experiment_id, json={"analysis": client_analysis})
+    assert response.status_code == 200
+    contents = answers.call_args.kwargs["contents"]
+    assert STORED_MARKER in contents and CLIENT_MARKER not in contents
+
+
+def test_ask_rejects_a_client_supplied_analysis(client, fake, answers):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    response = follow_up(client, "ask", experiment_id,
+                         json={"question": QUESTION, "analysis": {**RESULT, "probable_specimen": CLIENT_MARKER}})
+    assert response.status_code == 422
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("body", [{"question": ""}, {"question": "   "}, {"question": "x" * 501}, {}, {"question": None}])
+def test_ask_invalid_question_is_422_without_supabase(client, fake, answers, body):
+    response = follow_up(client, "ask", fake.add_draft(USER_A), json=body)
+    assert response.status_code == 422
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+def test_ask_accepts_a_500_char_question(client, fake, answers):
+    response = follow_up(client, "ask", fake.add_draft(USER_A), question="x" * 500)
+    assert response.status_code == 200
+    assert "x" * 500 in answers.call_args.kwargs["contents"]
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_on_other_users_experiment_is_404(client, fake, answers, action):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    stolen = follow_up(client, action, experiment_id, user="B")
+    missing = follow_up(client, action, uuid.uuid4(), user="B")
+    assert stolen.status_code == missing.status_code == 404
+    assert stolen.json() == missing.json() == NOT_FOUND
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+    assert_scoped(fake.requests, USER_B, USER_A)
+    assert STORED_MARKER not in stolen.text
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_non_uuid_is_404_without_supabase(client, fake, answers, action):
+    for bad in ("not-a-uuid", "1"):
+        response = follow_up(client, action, bad)
+        assert response.status_code == 404 and response.json() == NOT_FOUND
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_on_expired_draft_is_404(client, fake, answers, action):
+    experiment_id = fake.add_draft(USER_A, expires_in=timedelta(seconds=-1))
+    response = follow_up(client, action, experiment_id)
+    assert response.status_code == 404 and response.json() == NOT_FOUND
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("tamper", ["foreign_path", "dotdot_path", "foreign_user"])
+def test_follow_up_refuses_foreign_rows(client, fake, answers, action, tamper):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    if tamper == "foreign_user":
+        fake.get_body = json.dumps([{**fake.rows[experiment_id], "user_id": USER_B}]).encode()
+    else:
+        fake.rows[experiment_id]["image_path"] = (
+            f"{USER_B}/x/image.jpg" if tamper == "foreign_path" else f"{USER_A}/../{USER_B}/x/image.jpg")
+    response = follow_up(client, action, experiment_id)
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+    assert fake.by("POST", "/storage/v1/object/sign/") == []
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_unparsable_stored_analysis_is_503(client, fake, answers, action):
+    broken = {key: value for key, value in STORED.items() if key != "limitations"}
+    response = follow_up(client, action, fake.add_draft(USER_A, analysis=broken))
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("analysis", [
+    analysis_of_size(MAX_STORED_ANALYSIS_BYTES + 1, STORED),
+    {**STORED, "observations": ["Rectangular cells"] * 41},
+], ids=["total_size", "41_observations"])
+def test_follow_up_over_cap_stored_analysis_is_422(client, fake, answers, caplog, action, analysis):
+    experiment_id = fake.add_draft(USER_A, analysis=analysis)
+    with caplog.at_level(logging.DEBUG):
+        response = follow_up(client, action, experiment_id)
+    assert response.status_code == 422 and response.json() == TOO_LONG
+    assert quota_calls(fake) == []
+    assert answers.call_count == 0
+    assert "Logbook stored analysis rejected reason=too_long" in caplog.text
+    for private in (STORED_MARKER, USER_A, experiment_id):
+        assert private not in caplog.text
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_analysis_at_cap_is_accepted(client, fake, answers, action):
+    analysis = analysis_of_size(MAX_STORED_ANALYSIS_BYTES, STORED)
+    response = follow_up(client, action, fake.add_draft(USER_A, analysis=analysis))
+    assert response.status_code == 200
+    assert StoredAnalysis.model_validate(analysis).model_dump_json() in answers.call_args.kwargs["contents"]
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_per_user_daily_cap(client, fake, answers, action):
+    fake.quota_body = b"false"
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 429
+    assert response.json() == DAILY_LIMIT
+    assert 0 < int(response.headers["retry-after"]) <= 86400
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("quota_body", [b"null", b'"true"', b"[true]", b"{}", b"1", b"not json"])
+def test_follow_up_quota_fails_closed_on_non_boolean(client, fake, answers, action, quota_body):
+    fake.quota_body = quota_body
+    assert follow_up(client, action, fake.add_draft(USER_A)).status_code == 429
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_quota_rpc_failure_is_503(client, fake, answers, action):
+    fake.fail["rpc"] = 500
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("failure,status", [
+    (errors.ServerError(500, {"error": {"message": "provider detail"}}), 502),
+    (httpx.ReadTimeout("provider detail"), 504),
+], ids=["server_error", "timeout"])
+def test_follow_up_gemini_failure_still_costs_quota(client, fake, sdk, action, failure, status):
+    sdk.side_effect = failure
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == status
+    assert "provider detail" not in response.text
+    assert len(quota_calls(fake)) == 1
+    assert sdk.call_count == 1
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_global_daily_cap_is_503_and_costs_quota(client, fake, answers, action):
+    exhaust_global_cap()
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 503
+    assert response.json()["detail"].startswith("Daily Gemini request limit for this server")
+    assert 0 < int(response.headers["retry-after"]) <= 86400
+    assert len(quota_calls(fake)) == 1
+    assert answers.call_count == 0
+
+
+def test_follow_up_body_limit_is_the_json_limit(client, fake, answers):
+    use_settings(max_json_body_bytes=100)
+    response = follow_up(client, "ask", uuid.uuid4(), json={"question": "x" * 200})
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body exceeds the 100-byte limit."}
+    assert fake.requests == []
+    assert answers.call_count == 0
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_needs_app_token_when_set(client, fake, answers, action):
+    use_settings(app_token="dummy-app-token-for-tests")
+    response = follow_up(client, action, fake.add_draft(USER_A))
+    assert response.status_code == 401 and response.json() == {"detail": "Unauthorized client."}
+    accepted = follow_up(client, action, fake.add_draft(USER_A),
+                         headers={**auth(), "X-ScopePilot-Token": "dummy-app-token-for-tests"})
+    assert accepted.status_code == 200
+    assert len(quota_calls(fake)) == 1
+
+
+def test_quiz_without_a_body(client, fake, answers):
+    response = client.post(f"/v1/experiments/{fake.add_draft(USER_A)}/quiz", headers=auth())
+    assert response.status_code == 200 and response.json() == QUIZ
+
+
+def test_follow_up_bearer_rejection_logs_templated_paths(client, fake, caplog):
+    experiment_id = str(uuid.uuid4())
+    with caplog.at_level(logging.DEBUG):
+        client.post(f"/v1/experiments/{experiment_id}/ask", json={"question": QUESTION})
+        client.post(f"/v1/experiments/{experiment_id}/quiz")
+    app_lines = [r.getMessage() for r in caplog.records if r.name.startswith("app")]
+    assert "Request rejected rule=bearer path=/v1/experiments/{id}/ask reason=missing" in app_lines
+    assert "Request rejected rule=bearer path=/v1/experiments/{id}/quiz reason=missing" in app_lines
+    assert not any(experiment_id in line for line in app_lines)
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_follow_up_never_logs_private_values(client, fake, sdk, caplog, action):
+    experiment_id = fake.add_draft(USER_A, analysis=STORED)
+    responses = {}
+
+    def respond(*, model, contents, config):
+        return SimpleNamespace(text=json.dumps(QUIZ) if action == "quiz" else ANSWER)
+
+    with caplog.at_level(logging.DEBUG):
+        sdk.side_effect = respond
+        responses["ok"] = follow_up(client, action, experiment_id)
+        responses["other_user"] = follow_up(client, action, experiment_id, user="B")
+        responses["too_long"] = follow_up(client, action, fake.add_draft(
+            USER_A, analysis={**STORED, "observations": ["Rectangular cells"] * 41}))
+        sdk.side_effect = errors.ServerError(500, {"error": {"message": "provider detail"}})
+        responses["gemini"] = follow_up(client, action, experiment_id)
+        fake.quota_body = b"false"
+        responses["quota"] = follow_up(client, action, experiment_id)
+    assert {name: r.status_code for name, r in responses.items()} == {
+        "ok": 200, "other_user": 404, "too_long": 422, "gemini": 502, "quota": 429}
+    for private in (STORED_MARKER, SUPABASE_URL, USER_A, USER_B, experiment_id, QUESTION):
         assert private not in caplog.text
 
 

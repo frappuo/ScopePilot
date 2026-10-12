@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_secret_key: SecretStr = SecretStr("")
     logbook_bucket: str = Field(default="experiment-images", pattern=r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
-    user_daily_gemini_limit: int = Field(default=20, gt=0)
+    # Per user per UTC day, shared by create, experiment /ask and experiment /quiz.
+    user_daily_gemini_limit: int = Field(default=40, gt=0)
     max_saved_experiments_per_user: int = Field(default=50, gt=0)
     max_drafts_per_user: int = Field(default=10, gt=0)
     draft_ttl_hours: int = Field(default=24, gt=0, le=168)
