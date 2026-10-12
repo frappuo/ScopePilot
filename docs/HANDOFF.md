@@ -24,7 +24,7 @@ The AI is assistive and tentative; the student remains responsible for verifying
 -   FastAPI backend with Gemini; upload validation and re-encoding (section 5); structured, Pydantic-validated responses; the app shows the backend's `detail` for 400/413/415 only.
 -   Optional Gemini model fallback on quota or model-not-found (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model.
 -   Request limits (body size, `/ask`/`/quiz` input caps, global daily Gemini cap) and an optional shared app token (`APP_TOKEN`; a deterrent, not authentication).
--   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete; section 5). No login or logbook screens in the app yet.
+-   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete, experiment-scoped follow-up questions and quiz, daily usage in `GET /v1/me`; section 5). No login or logbook screens in the app yet.
 -   Braintrust prompt-evaluation harness with four variants and deterministic scorers.
 
 ### Verified on a physical device (user-reported)
@@ -51,20 +51,19 @@ Do not describe planned features as implemented.
 
 None of the following exists in the code. Remaining logbook PRs, in order:
 
--   PR 5: experiment-scoped `/ask` and `/quiz` (`experiment_id` instead of a client-supplied analysis), charging the same per-user daily quota that create already uses since PR 3. Today both accept the full analysis supplied by the client (`AskRequest.analysis`, `QuizRequest.analysis` in `backend/app/schemas/`).
 -   PR 6: account deletion.
 -   PR 7: legacy switch.
 -   Then the frontend login and experiments screens (no login in the app today).
 -   Later assistant features: cross-experiment context, learning tracking.
 -   RAG over trusted biology material.
 
-Also not implemented: per-user rate limiting on `/analyze`, `/ask` and `/quiz`. Today they have only a global, per-process daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`) and the mapping of a Gemini 429 to a 503. The per-user daily quota applies only to `POST /v1/experiments`.
+Also not implemented: per-user rate limiting on the legacy `/analyze`, `/ask` and `/quiz`. They have only a global, per-process daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`) and the mapping of a Gemini 429 to a 503. The per-user daily quota covers `POST /v1/experiments` and `POST /v1/experiments/{id}/ask` and `/quiz`.
 
 ### Known issues / follow-up tasks
 
 -   CORS is intentionally off, so the browser preview cannot call the backend.
 -   No authentication or per-user rate limiting on the legacy API (body limits, input caps, a global daily cap, and an optional shared app token exist).
--   `/ask` and `/quiz` trust the client-supplied analysis.
+-   The legacy `/ask` and `/quiz` trust the client-supplied analysis until PR 7 (legacy switch). The `/v1/experiments/{id}/ask` and `/quiz` routes read the stored analysis instead.
 -   Reconcile eval variant names (section 8).
 -   Gemini's handling of 16-bit grayscale PNG is untested.
 -   The code default `GEMINI_MODEL` (`gemini-2.5-flash`) differs from `backend/.env.example` (`gemini-3.1-flash-lite`) and was recorded as unavailable to new users (`progress.md`).
@@ -91,7 +90,7 @@ Planned RAG: trusted material → chunks → embeddings → vector retrieval →
 
 ## 5. Backend
 
-Layout: `routes/` = HTTP only, `schemas/` = Pydantic, `services/` = Gemini and business logic (`gemini.py`, `images.py`, `logbook.py`, `auth.py`), `config.py` = env, `middleware.py` = app token and body limits.
+Layout: `routes/` = HTTP only, `schemas/` = Pydantic, `services/` = Gemini and business logic (`gemini.py`, `images.py`, `logbook.py`, `auth.py`), `config.py` = env, `middleware.py` = app token, bearer auth, body limits and log-path templates.
 
 ### Endpoints
 
@@ -101,9 +100,11 @@ Layout: `routes/` = HTTP only, `schemas/` = Pydantic, `services/` = Gemini and b
 | `/analyze` | POST | Validate an image, call Gemini, return structured analysis. |
 | `/ask` | POST | Answer a follow-up using the analysis context. |
 | `/quiz` | POST | Generate quiz questions from the analysis context. |
-| `/v1/me` | GET | The signed-in user (Supabase token). |
-| `/v1/experiments` | POST, GET | Create a draft from an image; list own saved experiments and live drafts (PR 4 branch). |
-| `/v1/experiments/{id}` | GET, PATCH, DELETE | Read, edit/save (PATCH and DELETE on the PR 4 branch). |
+| `/v1/me` | GET | The signed-in user (Supabase token) and today's per-user Gemini usage (`usage`, or null if it could not be read). |
+| `/v1/experiments` | POST, GET | Create a draft from an image; list own saved experiments and live drafts. |
+| `/v1/experiments/{id}` | GET, PATCH, DELETE | Read; edit title/notes and save a draft; delete. |
+| `/v1/experiments/{id}/ask` | POST | Answer a follow-up question from the experiment's stored analysis. |
+| `/v1/experiments/{id}/quiz` | POST | Generate a quiz from the experiment's stored analysis (no body). |
 
 The `/v1` routes are the student logbook ("Student logbook" below); they need a Supabase access token.
 
@@ -135,17 +136,23 @@ Details in README.md. Not covered there:
 
 Steps are in README.md. iPhone camera JPEGs are detected by Pillow as `MPO` with two frames; before commit `d2ea65f` (2026-10-03) they got 415. MPO is now accepted as JPEG, first frame only. Limitations: 16-bit-per-channel RGB PNGs are reduced to 8 bits (only 16-bit grayscale round-trips); Gemini's handling of 16-bit PNG is untested; peak memory for a 20 MP image was roughly +170–340 MiB on Windows and has not been measured on Render.
 
-### Student logbook (PR 3 create and read: merged 2026-10-11 as PR #11, live-verified)
+### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14; PR 5)
 
-Planned slice 1: Supabase Auth login, saving an analysis as an experiment, and list/open/rename/delete. The backend verifies Supabase access tokens (every `/v1/*` route, `GET /v1/me`) and can create and read experiments (PR 3). List, rename, save and delete exist on the PR 4 branch (`feat/experiments-list-patch-delete`, not yet merged; migration 0002 not yet applied). The app's login and experiment screens do not exist yet.
+Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. Only the backend part is done; the app's login and logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), and answer questions and build quizzes from an experiment's stored analysis (PR 5). The app's login and experiment screens do not exist yet.
 
 -   `POST /v1/experiments` (multipart `image`): validates and cleans the upload with `prepare_image`, analyzes it with Gemini, and stores it as a draft that expires after `DRAFT_TTL_HOURS`. Stored with it: a metadata-free JPEG display copy (long edge at most 2048 px), a 256 px thumbnail, the model that answered and a hash of the production prompt (`PROMPT_VERSION`). Returns 201 with the experiment and short-lived signed image URLs.
-    -   Order: draft cap (409), `prepare_image`, display copies, the per-user daily quota (`consume_gemini_call`, 429 with `Retry-After`), Gemini, uploads, insert. A rejected image or a failed display copy costs no quota.
-    -   On failure: if Gemini fails, nothing is stored. If an upload fails, the uploaded images are deleted. If the insert fails, the row is deleted first (the insert may have committed before its response was lost) and the images only if that succeeded; otherwise they are kept so a surviving row keeps its images. On the PR 4 branch the insert goes through `create_draft` (draft cap under a per-user lock, nothing written after a deadline 8 s out), and the row cleanup waits until 2 s past that deadline and then calls `discard_draft`.
--   PR 4 branch: `GET /v1/experiments` (own saved experiments and live drafts, newest first, cursor paging, thumbnail URLs only), `PATCH /v1/experiments/{id}` (title/notes, save a draft; saved cap 409), `DELETE /v1/experiments/{id}` (row first, then images), and a best-effort purge of drafts expired for over 5 minutes after each create and list.
+    -   Order: draft cap (409), `prepare_image`, display copies, the per-user daily quota (`consume_gemini_call`, 429 with `Retry-After`), Gemini, the stored-analysis cap, uploads, insert. A rejected image or a failed display copy costs no quota. An analysis over the `StoredAnalysis` caps gives 502 "Gemini returned an invalid or empty analysis" and stores nothing; the quota unit stays spent.
+    -   On failure: if Gemini fails, nothing is stored. If an upload fails, the uploaded images are deleted. If the insert fails, the row is deleted first (the insert may have committed before its response was lost) and the images only if that succeeded; otherwise they are kept so a surviving row keeps its images. The insert goes through `create_draft` (draft cap under a per-user lock, nothing written after a deadline 8 s out), and the row cleanup waits until 2 s past that deadline and then calls `discard_draft`.
+-   `GET /v1/experiments` (own saved experiments and live drafts, newest first, cursor paging, thumbnail URLs only), `PATCH /v1/experiments/{id}` (title/notes, save a draft; saved cap 409), `DELETE /v1/experiments/{id}` (row first, then images), and a best-effort purge of drafts expired for over 5 minutes after each create and list.
 -   `GET /v1/experiments/{id}`: returns the caller's own experiment with freshly signed image URLs. Another user's ID, a non-UUID or an expired draft gives the same 404 as a missing ID.
+-   `POST /v1/experiments/{id}/ask` (body `{"question": "..."}`, 1-500 characters after trimming; any other field gives 422) and `POST /v1/experiments/{id}/quiz` (no body; a body is ignored). Both work on the caller's own drafts and saved experiments and store nothing. The analysis comes from the stored row, never from the request.
+    -   Order: non-UUID id → 404 before any request; read the row (another user's ID, a missing ID or an expired draft → 404; a foreign row or storage path → 503); parse the stored analysis (failure → 503); the `StoredAnalysis` caps (over → 422 "This experiment's analysis is too long for follow-up questions."); the per-user quota (429); Gemini (the same prompts as the legacy routes). Nothing before the quota step costs a unit. A Gemini failure (502/504) or the server-wide daily cap (503) still costs one.
+-   Stored-analysis cap (`StoredAnalysis`, `backend/app/schemas/analysis.py`): the same per-field caps as the legacy `/ask`/`/quiz` input (`AnalysisInput`), plus 32 KiB for the compact UTF-8 JSON in total. Enforced at create (502, nothing stored) and again at ask/quiz (422, no quota), so rows stored before the cap are refused rather than sent.
+-   Per-user daily quota: one unit per create, ask or quiz, `USER_DAILY_GEMINI_LIMIT` per UTC day (default 40), counted in `usage_daily` by `consume_gemini_call` on the database clock. When it is used up: 429 "Daily AI request limit reached for your account. Try again after 00:00 UTC." with `Retry-After` in seconds until 00:00 UTC. A non-boolean RPC result fails closed (429).
+-   `GET /v1/me` returns `usage` (`used_today`, `daily_limit`, `remaining`, `resets_at` = next 00:00 UTC), read from `usage_daily` with a 3 s timeout (`USAGE_TIMEOUT_SECONDS`). The timeout applies per connect, read and write step, not to the whole request, so a slow or trickling response can still hold `/v1/me` somewhat longer. Any failure or malformed row gives 200 with `usage: null` and a log line with op and status only. The backend clock picks the day while the quota RPC uses the database clock, so the two can disagree for a few seconds around midnight.
+-   Logs template experiment paths: `/v1/experiments/{id}`, `/v1/experiments/{id}/ask`, `/v1/experiments/{id}/quiz`. Any other path under the prefix logs as `/v1/experiments/{id}`. This covers app logs and, as a backstop, uvicorn's access log.
 -   Isolation lives in `backend/app/services/logbook.py`: every query filters by the verified `user_id`, every storage path must start with `<user_id>/`, and rows returned by Supabase are re-checked. Logs carry operation names and status codes only.
--   Tests use an in-memory fake of Supabase (`backend/tests/test_experiments.py`).
+-   Tests use an in-memory fake of Supabase (`backend/tests/test_experiments.py`). PR 5 (ask, quiz, caps, quota, `/v1/me` usage, log templates) is covered by mocked tests only: backend suite 518 passed, 1 skipped (httptools not installed).
 
 Verified live (2026-10-11, user-reported, against the real Supabase project):
 
@@ -160,12 +167,15 @@ Still unverified:
 -   That deleting a storage path that was never stored returns 200 (cleanup after a failed or timed-out upload relies on this).
 -   Latency between Render and Supabase.
 -   Memory on Render for the second decode (the display copies) on each create.
+-   PR 5 against the real Supabase project and real Gemini: experiment ask/quiz, quota counting across create/ask/quiz, and the `usage_daily` read in `/v1/me`.
+-   PR 4 against the real project (list, PATCH, DELETE, purge, `create_draft`/`discard_draft` from migration 0002).
 
 Known trade-offs / deferred:
 
 -   Orphaned storage objects persist until a sweeper exists: a crash between upload and insert, a failed image delete, or an expired-draft purge whose delete was still running when its re-check read. PR 6 account deletion must delete everything under the user's folder, not only the files listed in rows.
--   A Gemini failure, or hitting the server-wide daily cap, still costs one unit of the user's daily quota.
--   The stored analysis has no length cap. Add one in PR 5, before it feeds `/ask` and `/quiz`.
+-   A Gemini failure, or hitting the server-wide daily cap, still costs one unit of the user's daily quota (create, ask and quiz).
+-   The unit is also spent when the Gemini API key is not configured: the 503 comes after the charge, as in create. This is an operator setup error, not something a user can trigger.
+-   The per-user quota (default 40) is larger than the share of the server-wide `GEMINI_DAILY_CALL_LIMIT` (default 100, per process) that a few heavy users need to exhaust it for everyone. Revisit both limits before opening sign-ups.
 -   The draft and saved caps rely on PostgREST's default READ COMMITTED isolation (each count runs after the per-user advisory lock). Under REPEATABLE READ or stricter, the snapshot predates the lock and a concurrent create could be missed. Keep the default, or switch to per-user counter rows locked with SELECT ... FOR UPDATE.
 -   Migration 0002 sets a 5 s `statement_timeout` on `service_role`, which covers every backend statement. PR 6 account deletion (cascade plus storage cleanup) and any backfill must set a longer timeout for their own transaction.
 -   No per-user rate limit on `/v1` list, PATCH and DELETE, and every list (and create) also starts an expired-draft purge (2-4 Supabase calls). Add per-user limits, and run the purge at most once per user per few minutes.
@@ -179,7 +189,8 @@ Known trade-offs / deferred:
 Schema and settings:
 
 -   `supabase/migrations/0001_logbook.sql` creates `experiments`, `usage_daily`, the `consume_gemini_call` function and a private `experiment-images` bucket. Row-level security is on, with no policies, so the app's publishable key cannot touch them. Only the backend (secret key) can.
--   Settings: `SUPABASE_URL` (https origin), `SUPABASE_SECRET_KEY` (backend host only, never the app or the repo), `LOGBOOK_BUCKET`, `USER_DAILY_GEMINI_LIMIT`, `MAX_SAVED_EXPERIMENTS_PER_USER`, `MAX_DRAFTS_PER_USER`, `DRAFT_TTL_HOURS`. The logbook counts as configured only when both the URL and the secret key are set.
+-   `supabase/migrations/0002_logbook_caps.sql` (PR 4) adds `create_draft`, `discard_draft` and `update_experiment` (draft and saved caps under a per-user lock) and a 5 s `statement_timeout` on `service_role`. PR 5 needs no migration.
+-   Settings: `SUPABASE_URL` (https origin), `SUPABASE_SECRET_KEY` (backend host only, never the app or the repo), `LOGBOOK_BUCKET`, `USER_DAILY_GEMINI_LIMIT` (default 40, shared by create, ask and quiz), `MAX_SAVED_EXPERIMENTS_PER_USER`, `MAX_DRAFTS_PER_USER`, `DRAFT_TTL_HOURS`. The logbook counts as configured only when both the URL and the secret key are set.
 
 Setup (manual, not yet verified against a real project):
 

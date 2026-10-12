@@ -10,7 +10,9 @@ Implemented:
 - Expo TypeScript app: gallery image selection, analysis display, follow-up Q&A, and quiz.
 - Braintrust prompt-evaluation harness (`backend/evals/microscopy_eval.py`).
 
-Not implemented: RAG, camera capture in the app, user accounts, saved analyses, and per-user rate limiting. Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
+The backend also has a student logbook API under `/v1` (sign-in with a Supabase access token, saved experiments, and follow-up questions and quizzes on a saved experiment), but the app has no accounts or logbook screens yet.
+
+Not implemented: RAG, camera capture in the app, and per-user rate limiting on the legacy routes. Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
 
 ## Backend
 
@@ -80,7 +82,7 @@ No automatic provider retries are made.
 
 ### Request limits
 
-- **Body size** (`backend/app/middleware.py`): `/analyze` allows `MAX_IMAGE_BYTES` + 64 KiB of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES`; `/health` is exempt. A `Content-Length` over the limit gets 413 before anything is read; a chunked body is counted as it streams and gets 413 once it passes the limit.
+- **Body size** (`backend/app/middleware.py`): `/analyze` and `POST /v1/experiments` allow `MAX_IMAGE_BYTES` + 64 KiB of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES`; `/health` is exempt. A `Content-Length` over the limit gets 413 before anything is read; a chunked body is counted as it streams and gets 413 once it passes the limit.
 - **Input caps** for the analysis sent to `/ask` and `/quiz`: `probable_specimen` ≤ 300 characters, `explanation` ≤ 6000, each list ≤ 40 items of ≤ 1000 characters; over a cap gives 422. The `/analyze` response is not capped.
 - **Daily Gemini cap**: at most `GEMINI_DAILY_CALL_LIMIT` Gemini attempts per UTC day, fallback attempts included; then 503 with `Retry-After` (seconds until 00:00 UTC). The count is per process and resets on restart; Google's own quota reset time may differ from UTC midnight. Requests rejected before Gemini (bad images, caps, body size) do not count.
 - These are global limits, not per-user rate limiting or authentication.
