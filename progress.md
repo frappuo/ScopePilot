@@ -3,6 +3,29 @@
 Dated log, newest first. Current status, planned features, and known issues
 live in `docs/HANDOFF.md`.
 
+## Logbook PR 4-5 live check (2026-10-12)
+
+User-reported; backend run locally against the real Supabase project and real
+Gemini, two test users.
+
+- Migration 0002 is applied (`create_draft`, `discard_draft`,
+  `update_experiment`, `consume_gemini_call`; 5 s `statement_timeout` on
+  `service_role`).
+- PR 4: create via `create_draft`; list with a signed thumbnail; PATCH save
+  without a title gives 422, with a title sets `saved_at` and clears
+  `expires_at`; DELETE 204, then GET/DELETE 404 and the images are gone.
+  Deleting storage paths that no longer exist succeeds.
+- PR 5: experiment ask and quiz work; `/v1/me` usage went 0 -> 3 after create,
+  ask and quiz (remaining 37); the other user's usage stayed 0.
+- Isolation: the other user got 404 on read, ask, quiz, PATCH and DELETE, and
+  the experiment was unchanged.
+- 10 orphaned image pairs from 2026-10-11 (most likely creates run before 0002
+  was applied) were found and removed; this confirms "apply 0002 first" and
+  the need for a sweeper.
+- Custom SMTP is off; configure it before real users sign up. The Supabase
+  variables are still unset on Render.
+- Not exercised live: the expired-draft purge and the 409 draft/saved caps.
+
 ## Logbook PR 5 (2026-10-12)
 
 - PR 3 (create/read, #11) and PR 4 (list, edit/save, delete, migration 0002,
