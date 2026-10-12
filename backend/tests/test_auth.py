@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings, get_settings
 from app.dependencies import current_user
 from app.main import app
-from app.services import auth
+from app.services import auth, logbook
 from app.services.auth import AuthenticatedUser
 
 KEY = "test-key-not-real"
@@ -91,6 +92,28 @@ def jwks(monkeypatch):
     auth.reset_refetch_cooldown()
 
 
+@pytest.fixture(autouse=True)
+def supabase(monkeypatch):
+    """Serves /v1/me's usage read (no row) and nothing else, so no test here reaches the network."""
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.headers["apikey"] == SECRET_KEY
+        assert request.method == "GET" and request.url.path == "/rest/v1/usage_daily"
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(logbook, "_transport", httpx.MockTransport(handler))
+    return requests
+
+
+def assert_unused(usage):
+    """Usage for a user with no calls today, under the settings the test runs with."""
+    limit = app.dependency_overrides[get_settings]().user_daily_gemini_limit
+    assert usage["used_today"] == 0
+    assert usage["daily_limit"] == usage["remaining"] == limit
+
+
 @pytest.fixture
 def client(monkeypatch, jwks):
     monkeypatch.setattr("app.main.get_settings", lambda: Settings(_env_file=None, gemini_api_key=KEY))
@@ -109,7 +132,9 @@ def assert_invalid(response):
 def test_valid_token_returns_user(client, jwks):
     response = client.get("/v1/me", headers=bearer(mint()))
     assert response.status_code == 200
-    assert response.json() == {"user_id": USER_ID, "email": EMAIL}
+    body = response.json()
+    assert_unused(body.pop("usage"))
+    assert body == {"user_id": USER_ID, "email": EMAIL}
     assert jwks.calls == 1
     client.get("/v1/me", headers=bearer(mint()))
     assert jwks.calls == 1  # JWKS cached
@@ -117,7 +142,9 @@ def test_valid_token_returns_user(client, jwks):
 
 def test_token_without_email(client):
     response = client.get("/v1/me", headers=bearer(mint(drop=("email",))))
-    assert response.json() == {"user_id": USER_ID, "email": None}
+    body = response.json()
+    assert_unused(body.pop("usage"))
+    assert body == {"user_id": USER_ID, "email": None}
 
 
 def test_missing_header(client, jwks):
@@ -311,9 +338,21 @@ def test_bearer_check_precedes_body_limit(client):
 def test_current_user_override(client):
     app.dependency_overrides[current_user] = lambda: AuthenticatedUser(user_id=USER_ID, email=None)
     response = client.get("/v1/me", headers=bearer(mint(sub=str(uuid.uuid4()))))
-    assert response.json() == {"user_id": USER_ID, "email": None}
+    body = response.json()
+    assert_unused(body.pop("usage"))
+    assert body == {"user_id": USER_ID, "email": None}
     # The middleware still guards /v1: overriding the dependency does not bypass it.
     assert_invalid(client.get("/v1/me"))
+
+
+def test_me_reads_usage_once_without_forwarding_the_session_token(client, supabase):
+    token = mint()
+    assert client.get("/v1/me", headers=bearer(token)).status_code == 200
+    (request,) = supabase
+    assert request.headers["apikey"] == SECRET_KEY
+    assert "authorization" not in request.headers
+    for part in token.split("."):
+        assert part not in str(request.url) and part not in str(request.headers)
 
 
 def test_no_token_email_or_claims_in_logs(client, jwks, caplog):

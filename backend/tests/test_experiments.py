@@ -70,6 +70,8 @@ class FakeSupabase:
         self.waits: list[float] = []  # Seconds logbook._wait was asked to sleep.
         self.get_body: bytes | None = None  # Raw 200 body for the experiment GET; None filters rows.
         self.list_extra: list[dict] = []  # Rows appended to every list response.
+        self.usage: dict[tuple[str, str], int] = {}  # usage_daily: (user_id, UTC date) -> gemini_calls.
+        self.usage_body: bytes | None = None  # Raw 200 body for the usage_daily GET; None filters rows.
         self.signed = 0
 
     def add_draft(self, user_id, expires_in=timedelta(hours=1), created_at=None, **fields):
@@ -220,6 +222,8 @@ class FakeSupabase:
         """Names the request the way logbook.py does, for `fail` and `hooks`."""
         if path.startswith("/rest/v1/rpc/"):
             return path.removeprefix("/rest/v1/rpc/")
+        if path == "/rest/v1/usage_daily":
+            return "usage"
         if path != "/rest/v1/experiments":
             return None
         if method == "GET":
@@ -251,8 +255,23 @@ class FakeSupabase:
             self.hooks.pop(op)()
 
         if path == "/rest/v1/rpc/consume_gemini_call":
-            return self._failure("rpc", request) or httpx.Response(
-                200, content=self.quota_body, headers={"content-type": "application/json"})
+            failure = self._failure("rpc", request)
+            if failure:
+                return failure
+            if self.quota_body == b"true":  # The unit was taken: count it as the SQL function does.
+                key = (body["p_user"], now().date().isoformat())
+                self.usage[key] = self.usage.get(key, 0) + 1
+            return httpx.Response(200, content=self.quota_body, headers={"content-type": "application/json"})
+        if op == "usage":
+            failure = self._failure("usage", request)
+            if failure:
+                return failure
+            if self.usage_body is not None:
+                return httpx.Response(200, content=self.usage_body)
+            assert method == "GET" and params["select"] == "user_id,gemini_calls"
+            found = [{"user_id": user, "gemini_calls": calls} for (user, day), calls in self.usage.items()
+                     if params["user_id"] == f"eq.{user}" and params["day"] == f"eq.{day}"]
+            return httpx.Response(200, json=found)
         if path == "/rest/v1/rpc/create_draft":
             return self._create_draft(request, body)
         if path == "/rest/v1/rpc/update_experiment":
@@ -424,7 +443,7 @@ def assert_scoped(requests, user_id, other_id):
         if path == "/rest/v1/rpc/create_draft":
             assert body["p_user"] == user_id
             assert body["p_image_path"].startswith(prefix) and body["p_thumb_path"].startswith(prefix)
-        elif path == "/rest/v1/experiments":
+        elif path in ("/rest/v1/experiments", "/rest/v1/usage_daily"):
             assert request.url.params["user_id"] == f"eq.{user_id}"
         elif path in ("/rest/v1/rpc/consume_gemini_call", "/rest/v1/rpc/update_experiment",
                       "/rest/v1/rpc/discard_draft"):
@@ -1700,6 +1719,140 @@ def test_follow_up_never_logs_private_values(client, fake, sdk, caplog, action):
         assert private not in caplog.text
 
 
+# --- /v1/me usage --------------------------------------------------------------------
+
+
+def freeze(monkeypatch, utc, local):
+    """Freeze logbook's clock: now(tz) is the instant utc, now() is a naive local time on another date."""
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return local if tz is None else utc.astimezone(tz)
+
+    monkeypatch.setattr(logbook, "datetime", Frozen)
+
+
+def me(client, user="A"):
+    response = client.get("/v1/me", headers=auth(user))
+    assert response.status_code == 200
+    return response.json()["usage"]
+
+
+def usage_requests(fake):
+    return fake.by("GET", "/rest/v1/usage_daily")
+
+
+def test_me_usage_without_a_row(client, fake):
+    limit = settings().user_daily_gemini_limit
+    assert {k: v for k, v in me(client).items() if k != "resets_at"} == {
+        "used_today": 0, "daily_limit": limit, "remaining": limit}
+    (request,) = fake.requests
+    assert request.method == "GET" and request.url.path == "/rest/v1/usage_daily"
+    assert dict(request.url.params) == {"select": "user_id,gemini_calls", "user_id": f"eq.{USER_A}",
+                                        "day": f"eq.{now().date().isoformat()}"}
+    assert "authorization" not in request.headers and "token-A" not in str(request.headers)
+
+
+def test_me_usage_request_uses_the_short_timeout(client, fake):
+    me(client)
+    (request,) = usage_requests(fake)
+    assert request.extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"),
+                                                          logbook.USAGE_TIMEOUT_SECONDS)
+    assert logbook.USAGE_TIMEOUT_SECONDS == 3
+
+
+@pytest.mark.parametrize("used,limit,remaining", [(7, 10, 3), (10, 10, 0), (45, 10, 0)])
+def test_me_usage_counts(client, fake, used, limit, remaining):
+    use_settings(user_daily_gemini_limit=limit)
+    fake.usage[(USER_A, now().date().isoformat())] = used
+    fake.usage[(USER_B, now().date().isoformat())] = 1  # Another user's row is never read.
+    fake.usage[(USER_A, (now().date() - timedelta(days=1)).isoformat())] = 9  # Nor yesterday's.
+    usage = me(client)
+    assert (usage["used_today"], usage["daily_limit"], usage["remaining"]) == (used, limit, remaining)
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+@pytest.mark.parametrize("utc,local,day,resets_at", [
+    (datetime(2026, 10, 12, 23, 59, 30, tzinfo=timezone.utc), datetime(2026, 10, 13, 4, 59, 30),
+     "2026-10-12", datetime(2026, 10, 13, tzinfo=timezone.utc)),
+    (datetime(2026, 10, 13, 0, 0, 30, tzinfo=timezone.utc), datetime(2026, 10, 12, 19, 0, 30),
+     "2026-10-13", datetime(2026, 10, 14, tzinfo=timezone.utc)),
+    (datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc), datetime(2026, 10, 11, 12, 0),
+     "2026-10-12", datetime(2026, 10, 13, tzinfo=timezone.utc)),
+], ids=["before_midnight", "after_midnight", "midday"])
+def test_me_usage_uses_the_utc_day(client, fake, monkeypatch, utc, local, day, resets_at):
+    freeze(monkeypatch, utc, local)
+    fake.usage[(USER_A, day)] = 4
+    usage = me(client)
+    assert usage["used_today"] == 4
+    (request,) = usage_requests(fake)
+    assert request.url.params["day"] == f"eq.{day}"
+    parsed = datetime.fromisoformat(usage["resets_at"])
+    assert parsed == resets_at and parsed.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize("body", [
+    json.dumps([{"user_id": USER_B, "gemini_calls": 1}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": True}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": -1}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": "3"}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": 1.5}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": None}]).encode(),
+    json.dumps([{"user_id": USER_A, "gemini_calls": 1}] * 2).encode(),
+    b"{}",
+    b"[1]",
+    b"not json",
+], ids=["foreign_user", "bool", "negative", "string", "float", "null", "two_rows", "object", "not_a_row", "not_json"])
+def test_me_usage_bad_response_is_null(client, fake, caplog, body):
+    fake.usage_body = body
+    with caplog.at_level(logging.DEBUG):
+        assert me(client) is None
+    assert "Logbook usage read failed op=usage status=bad_response" in caplog.text
+    for private in (USER_A, USER_B, SUPABASE_URL, SECRET):
+        assert private not in caplog.text
+
+
+def raise_timeout():
+    raise httpx.ReadTimeout("fake timeout")
+
+
+@pytest.mark.parametrize("failure", [500, "transport", "timeout"])
+def test_me_usage_read_failure_is_200_with_null_usage(client, fake, caplog, failure):
+    if failure == "timeout":
+        fake.hooks["usage"] = raise_timeout
+    else:
+        fake.fail["usage"] = failure
+    with caplog.at_level(logging.DEBUG):
+        response = client.get("/v1/me", headers=auth())
+    assert response.status_code == 200
+    assert response.json() == {"user_id": USER_A, "email": None, "usage": None}
+    assert "Logbook usage read failed op=usage status=request" in caplog.text
+    for private in (USER_A, SUPABASE_URL, SECRET):
+        assert private not in caplog.text
+
+
+def test_me_usage_counts_experiment_ask_and_quiz(client, fake, sdk):
+    sdk.side_effect = lambda *, model, contents, config: SimpleNamespace(
+        text=json.dumps(QUIZ) if config.system_instruction == gemini.QUIZ_PROMPT else ANSWER)
+    limit = settings().user_daily_gemini_limit
+    experiment_id = fake.add_draft(USER_A)
+    assert follow_up(client, "ask", experiment_id).status_code == 200
+    usage = me(client)
+    assert (usage["used_today"], usage["remaining"]) == (1, limit - 1)
+    assert follow_up(client, "quiz", experiment_id).status_code == 200
+    assert me(client)["used_today"] == 2
+
+    fake.requests.clear()
+    assert me(client, user="B")["used_today"] == 0
+    assert_scoped(fake.requests, USER_B, USER_A)
+
+
+def test_me_without_valid_bearer_makes_no_supabase_request(client, fake):
+    assert client.get("/v1/me").status_code == 401
+    assert client.get("/v1/me", headers=auth("nobody")).status_code == 401
+    assert fake.requests == []
+
+
 # --- display copies ------------------------------------------------------------------
 
 
@@ -1818,6 +1971,7 @@ def test_not_configured(client, fake, sdk):
     response = client.get(f"/v1/experiments/{uuid.uuid4()}", headers=auth())
     assert response.status_code == 503
     assert response.json() == {"detail": "Logbook not configured."}
+    assert client.get("/v1/me", headers=auth()).json() == {"detail": "Logbook not configured."}
     assert fake.requests == []
     assert sdk.call_count == 0
 

@@ -22,6 +22,7 @@ from app.config import Settings
 from app.schemas.analysis import Analysis, StoredAnalysis
 from app.schemas.ask import AskResponse
 from app.schemas.experiment import Experiment, ExperimentPage, ExperimentSummary, ExperimentUpdate
+from app.schemas.me import DailyUsage
 from app.schemas.quiz import QuizResponse
 from app.services.errors import AnalysisError
 from app.services.gemini import PROMPT_VERSION, analyze_image_with_model, answer_question, generate_quiz
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 SIGNED_URL_SECONDS = 600
 SUPABASE_TIMEOUT_SECONDS = 10  # Keep above the service_role statement_timeout (5 s, migration 0002).
+USAGE_TIMEOUT_SECONDS = 3  # The usage read is read-only and must not hold /v1/me, the session check.
 CREATE_DEADLINE_SECONDS = SUPABASE_TIMEOUT_SECONDS - 2  # create_draft writes nothing after this.
 # Cleanup waits this long past the deadline, so the database clock may lag this host's by up to
 # about this much (minus the discard call's latency) without a late create slipping through.
@@ -153,6 +155,37 @@ def _charge_quota(user_id: str, settings: Settings) -> None:
     if not consume_gemini_call(user_id, settings):
         retry_after = _seconds_until_utc_midnight(datetime.now(timezone.utc))
         raise AnalysisError(429, DAILY_LIMIT, headers={"Retry-After": str(retry_after)})
+
+
+def get_daily_usage(user_id: str, settings: Settings) -> DailyUsage | None:
+    """The user's quota use for the current UTC day, or None if it cannot be read. Never raises.
+
+    No row means nothing used yet. The backend clock picks the day, while consume_gemini_call
+    uses the database clock, so the two can disagree for a few seconds around 00:00 UTC.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        rows = _json(_request("usage", settings, "GET", "/rest/v1/usage_daily", params={
+            "select": "user_id,gemini_calls",
+            "user_id": f"eq.{user_id}",
+            "day": f"eq.{now.date().isoformat()}",
+        }, timeout=USAGE_TIMEOUT_SECONDS))
+    except Exception:
+        # /v1/me is the session check: a failed read leaves usage unknown, never fails the request.
+        logger.warning("Logbook usage read failed op=usage status=request")
+        return None
+    if rows == []:
+        used = 0
+    elif isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict) \
+            and rows[0].get("user_id") == user_id and type(rows[0].get("gemini_calls")) is int \
+            and rows[0]["gemini_calls"] >= 0:
+        used = rows[0]["gemini_calls"]
+    else:
+        logger.warning("Logbook usage read failed op=usage status=bad_response")
+        return None
+    limit = settings.user_daily_gemini_limit
+    return DailyUsage(used_today=used, daily_limit=limit, remaining=max(0, limit - used),
+                      resets_at=_next_utc_midnight(now))
 
 
 def upload_object(user_id: str, path: str, data: bytes, settings: Settings) -> None:
@@ -288,9 +321,12 @@ def _experiment(user_id: str, row: dict[str, Any], settings: Settings) -> Experi
         raise _unavailable("parse_row", "bad_response") from None
 
 
+def _next_utc_midnight(now: datetime) -> datetime:
+    return datetime.combine(now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+
 def _seconds_until_utc_midnight(now: datetime) -> int:
-    midnight = datetime.combine(now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc)
-    return max(1, math.ceil((midnight - now).total_seconds()))
+    return max(1, math.ceil((_next_utc_midnight(now) - now).total_seconds()))
 
 
 def _cleanup(user_id: str, paths: list[str], settings: Settings, op: str) -> None:
