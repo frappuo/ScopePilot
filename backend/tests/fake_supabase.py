@@ -36,9 +36,11 @@ def now():
 class FakeSupabase:
     """In-memory PostgREST + Storage, mirroring the SQL in supabase/migrations. Records every request.
 
-    `fail` maps an op to a status or "transport" ("insert" also takes "after_commit": the row is
-    stored, then the response is lost). `hooks` maps an op to a callable run just before it, to
-    simulate a concurrent request.
+    `fail` maps an op to a status or "transport" ("insert", the deletes and "auth_delete" also take
+    "after_commit": the write happens, then the response is lost). `hooks` maps an op to a callable
+    run just before it, to simulate a concurrent request. `auth_users` stands in for auth.users:
+    deleting one cascades to its rows and usage, and once it is gone the quota RPC and create_draft
+    fail with the FK violation PostgREST reports as 409.
     """
 
     def __init__(self):
@@ -61,6 +63,9 @@ class FakeSupabase:
         self.list_extra_objects: list[dict] = []  # Entries appended to every storage listing.
         self.delete_noop = False  # The storage delete answers 200 but removes nothing.
         self.list_objects_body: bytes | None = None  # Raw 200 body for the storage list; None lists objects.
+        self.auth_users: set[str] = {USER_A, USER_B}
+        self.auth_404_body = {"code": 404, "error_code": "user_not_found", "msg": "User not found"}
+        self.bodies: dict[str, bytes] = {}  # Raw 200 bodies for delete_rows / delete_usage; else the rows.
 
     def add_draft(self, user_id, expires_in=timedelta(hours=1), created_at=None, **fields):
         experiment_id = str(uuid.uuid4())
@@ -167,6 +172,8 @@ class FakeSupabase:
                 if r["user_id"] == user and r["status"] == "draft" and self._live(r, now())]
         if body["p_max_drafts"] is None or len(live) >= body["p_max_drafts"]:
             return httpx.Response(200, json={"result": "draft_limit"})
+        if user not in self.auth_users:
+            return self._fk_violation()
         row = {
             "id": body["p_id"], "user_id": user, "status": "draft", "title": None, "notes": "",
             "analysis": body["p_analysis"], "model": body["p_model"], "prompt_version": body["p_prompt_version"],
@@ -221,12 +228,55 @@ class FakeSupabase:
         return httpx.Response(200, json={"result": "ok", "row": row})
 
     @staticmethod
+    def _fk_violation():
+        return httpx.Response(409, json={"code": "23503", "message": "violates foreign key constraint"})
+
+    def _delete_owned(self, op, request, params, table):
+        """DELETE ... ?user_id=eq.<uid> on experiments or usage_daily, returning {"user_id": ...} per row."""
+        assert params["select"] == "user_id" and request.headers.get("prefer") == "return=representation"
+        committed_then_lost = self.fail.get(op) == "after_commit"
+        failure = None if committed_then_lost else self._failure(op, request)
+        if failure:
+            return failure
+        if table == "experiments":
+            found = [key for key, row in self.rows.items() if f"eq.{row['user_id']}" == params["user_id"]]
+            for key in found:
+                del self.rows[key]
+        else:
+            found = [key for key in self.usage if f"eq.{key[0]}" == params["user_id"]]
+            for key in found:
+                del self.usage[key]
+        if committed_then_lost:
+            raise httpx.ReadTimeout("fake lost response", request=request)
+        if op in self.bodies:
+            return httpx.Response(200, content=self.bodies[op])
+        return httpx.Response(200, json=[{"user_id": params["user_id"].removeprefix("eq.")} for _ in found])
+
+    def _delete_auth_user(self, request, user_id, body):
+        assert body == {"should_soft_delete": False}
+        committed_then_lost = self.fail.get("auth_delete") == "after_commit"
+        failure = None if committed_then_lost else self._failure("auth_delete", request)
+        if failure:
+            return failure
+        if user_id not in self.auth_users:
+            return httpx.Response(404, json=self.auth_404_body)
+        self.auth_users.discard(user_id)
+        # on delete cascade (0001): experiments and usage_daily rows go with the user.
+        self.rows = {key: row for key, row in self.rows.items() if row["user_id"] != user_id}
+        self.usage = {key: calls for key, calls in self.usage.items() if key[0] != user_id}
+        if committed_then_lost:
+            raise httpx.ReadTimeout("fake lost response", request=request)
+        return httpx.Response(200, json={})
+
+    @staticmethod
     def _op(path, method, params, request):
         """Names the request the way logbook.py does, for `fail` and `hooks`."""
         if path.startswith("/rest/v1/rpc/"):
             return path.removeprefix("/rest/v1/rpc/")
         if path == "/rest/v1/usage_daily":
-            return "usage"
+            return "delete_usage" if method == "DELETE" else "usage"
+        if path.startswith("/auth/v1/admin/users/"):
+            return "auth_delete"
         if path == f"/storage/v1/object/list/{BUCKET}":
             return "list_objects"
         if path == f"/storage/v1/object/{BUCKET}" and method == "DELETE":
@@ -239,6 +289,8 @@ class FakeSupabase:
             if "status" in params:
                 return "purge_select" if params["expires_at"].startswith("lte.") else "count"
             return "purge_recheck" if params.get("id", "").startswith("in.") else "get"
+        if method == "DELETE" and "id" not in params:
+            return "delete_rows"
         if method == "DELETE" and request.headers.get("prefer") == "return=representation":
             return "purge_delete" if params["id"].startswith("in.") else "delete_experiment"
         return None
@@ -265,10 +317,19 @@ class FakeSupabase:
             failure = self._failure("rpc", request)
             if failure:
                 return failure
+            if body["p_user"] not in self.auth_users:
+                return self._fk_violation()
             if self.quota_body == b"true":  # The unit was taken: count it as the SQL function does.
                 key = (body["p_user"], now().date().isoformat())
                 self.usage[key] = self.usage.get(key, 0) + 1
             return httpx.Response(200, content=self.quota_body, headers={"content-type": "application/json"})
+        if op == "delete_rows":
+            return self._delete_owned(op, request, params, "experiments")
+        if op == "delete_usage":
+            return self._delete_owned(op, request, params, "usage_daily")
+        if op == "auth_delete":
+            assert method == "DELETE"
+            return self._delete_auth_user(request, path.removeprefix("/auth/v1/admin/users/"), body)
         if op == "usage":
             failure = self._failure("usage", request)
             if failure:
@@ -415,6 +476,8 @@ def assert_scoped(requests, user_id, other_id):
             assert all(p.startswith(prefix) for p in body["prefixes"])
         elif path == f"/storage/v1/object/list/{BUCKET}":
             assert body["prefix"].startswith(prefix)
+        elif path.startswith("/auth/v1/"):
+            assert path == f"/auth/v1/admin/users/{user_id}"
         else:
             assert path.startswith(f"/storage/v1/object/{BUCKET}/{prefix}")
         assert other_id not in str(request.url)

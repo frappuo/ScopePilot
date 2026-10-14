@@ -1,21 +1,33 @@
 """Account deletion (logbook PR 6). Hermetic: Supabase is the in-memory fake in fake_supabase.py,
 and every value is a dummy.
 
-Stage 1: the storage sweep of "<uid>/", which must remove every object in the user's folder,
-including orphans that no row lists, and never anything outside it.
+The storage sweep of "<uid>/" must remove every object in the user's folder, including orphans
+that no row lists, and never anything outside it. delete_account removes rows, objects and the
+Auth user in that order, and a retry must finish whatever a failed attempt left.
 """
 
+from datetime import timedelta
+from io import BytesIO
 import json
 import logging
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 import uuid
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
 
-from app.services import logbook
+from app.config import Settings
+from app.main import app
+from app.services import gemini, logbook
 from app.services.errors import AnalysisError
 
-from fake_supabase import BUCKET, SECRET, USER_A, USER_B, FakeSupabase, assert_scoped, settings
+from fake_supabase import (
+    BUCKET, KEY, RESULT, SECRET, USER_A, USER_B, FakeSupabase, assert_scoped, auth, fake_verify, now,
+    settings, use_settings,
+)
 
 
 @pytest.fixture
@@ -234,3 +246,256 @@ def test_non_canonical_user_id_is_refused_before_any_request(fake, user_id):
 def assert_logs_clean(caplog):
     for secret in (USER_A, USER_B, SECRET, "stray.jpg", "deep.jpg"):
         assert secret not in caplog.text
+
+
+# --- delete_account ------------------------------------------------------------------------
+
+
+UNAVAILABLE = {"detail": "Logbook is temporarily unavailable. Please try again."}
+
+
+@pytest.fixture
+def sdk(monkeypatch):
+    factory = MagicMock()
+    generate = factory.return_value.__enter__.return_value.models.generate_content
+    generate.return_value = SimpleNamespace(text=json.dumps(RESULT))
+    monkeypatch.setattr(gemini.genai, "Client", factory)
+    return generate
+
+
+@pytest.fixture
+def client(monkeypatch, fake, sdk):
+    monkeypatch.setattr("app.main.get_settings", lambda: Settings(_env_file=None, gemini_api_key=KEY))
+    monkeypatch.setattr("app.middleware.verify_access_token", fake_verify)
+    use_settings()
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+
+
+def png():
+    stream = BytesIO()
+    Image.new("RGB", (8, 8), "white").save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def create(client):
+    return client.post("/v1/experiments", files={"image": ("upload", png(), "image/png")}, headers=auth())
+
+
+def seed(fake, user_id):
+    """populate() plus an expired draft and usage rows on two days."""
+    populate(fake, user_id)
+    fake.add_draft(user_id, expires_in=-timedelta(hours=2))
+    fake.usage[(user_id, now().date().isoformat())] = 3
+    fake.usage[(user_id, (now() - timedelta(days=1)).date().isoformat())] = 7
+
+
+def state(fake, user_id):
+    """Everything stored for user_id, for before/after comparisons."""
+    return {
+        "rows": {key: dict(row) for key, row in fake.rows.items() if row["user_id"] == user_id},
+        "usage": {key: calls for key, calls in fake.usage.items() if key[0] == user_id},
+        "objects": owned(fake, user_id),
+        "auth": user_id in fake.auth_users,
+    }
+
+
+def assert_gone(fake, user_id):
+    assert state(fake, user_id) == {"rows": {}, "usage": {}, "objects": {}, "auth": False}
+
+
+def delete_a():
+    logbook.delete_account(USER_A, settings())
+
+
+def ops(fake):
+    """The op of each request, with consecutive repeats collapsed."""
+    names = [FakeSupabase._op(r.url.path, r.method, r.url.params, r) for r in fake.requests]
+    return [name for index, name in enumerate(names) if index == 0 or name != names[index - 1]]
+
+
+def test_delete_account_removes_everything_for_that_user_only(fake, caplog):
+    seed(fake, USER_A)
+    seed(fake, USER_B)
+    others = state(fake, USER_B)
+
+    with caplog.at_level(logging.INFO, logger="app"):
+        delete_a()
+
+    assert_gone(fake, USER_A)
+    assert state(fake, USER_B) == others
+    assert_scoped(fake.requests, USER_A, USER_B)
+    assert ops(fake) == ["delete_rows", "delete_usage", "list_objects", "delete", "list_objects",
+                         "auth_delete", "list_objects"]
+    assert all(request.headers["apikey"] == SECRET and "authorization" not in request.headers
+               for request in fake.requests)
+    assert "Account deletion op=rows experiments=3 usage=2" in caplog.text
+    assert "Account deletion op=objects deleted=8 rounds=2" in caplog.text
+    assert "Account deletion op=auth result=deleted" in caplog.text
+    assert "Account deletion op=final_sweep deleted=0 rounds=1" in caplog.text
+    assert_logs_clean(caplog)
+
+
+def test_repeat_delete_after_success_is_a_quiet_no_op(fake, caplog):
+    seed(fake, USER_A)
+    delete_a()
+    with caplog.at_level(logging.INFO, logger="app"):
+        delete_a()
+    assert "op=rows experiments=0 usage=0" in caplog.text
+    assert "op=auth result=absent" in caplog.text
+    assert all(record.levelno < logging.WARNING for record in caplog.records)
+    assert_gone(fake, USER_A)
+
+
+# What each failed step leaves: (experiment rows, usage rows, objects, Auth user) still present.
+@pytest.mark.parametrize("op, failure, left", [
+    ("delete_rows", 500, (True, True, True, True)),
+    ("delete_rows", "transport", (True, True, True, True)),
+    ("delete_rows", "after_commit", (False, True, True, True)),
+    ("delete_usage", 500, (False, True, True, True)),
+    ("delete_usage", "after_commit", (False, False, True, True)),
+    ("list_objects", 500, (False, False, True, True)),
+    ("list_objects", "transport", (False, False, True, True)),
+    ("delete", 500, (False, False, True, True)),
+    ("auth_delete", 500, (False, False, False, True)),
+    ("auth_delete", "transport", (False, False, False, True)),
+    ("auth_delete", "after_commit", (False, False, False, False)),
+])
+def test_failed_step_stops_the_rest_and_a_retry_finishes(fake, caplog, op, failure, left):
+    seed(fake, USER_A)
+    seed(fake, USER_B)
+    others = state(fake, USER_B)
+    fake.fail[op] = failure
+
+    with caplog.at_level(logging.INFO, logger="app"), pytest.raises(AnalysisError) as raised:
+        delete_a()
+
+    assert raised.value.status_code == 503
+    remaining = state(fake, USER_A)
+    assert (bool(remaining["rows"]), bool(remaining["usage"]), bool(remaining["objects"]), remaining["auth"]) == left
+    assert_logs_clean(caplog)
+
+    fake.fail.clear()
+    delete_a()  # The same user, as with the same still-valid access token.
+    assert_gone(fake, USER_A)
+    assert state(fake, USER_B) == others
+
+
+def test_failed_final_sweep_is_finished_by_a_retry_after_the_auth_user_is_gone(fake, caplog):
+    seed(fake, USER_A)
+    late = f"{USER_A}/{uuid.uuid4()}/image.jpg"
+
+    def create_finishing_meanwhile():
+        fake.objects[late] = b"late"
+        fake.fail["list_objects"] = 500
+
+    fake.hooks["auth_delete"] = create_finishing_meanwhile
+    with caplog.at_level(logging.INFO, logger="app"), pytest.raises(AnalysisError):
+        delete_a()
+    assert "Account deletion failed op=final_sweep" in caplog.text
+    assert USER_A not in fake.auth_users and late in fake.objects
+
+    fake.fail.clear()
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="app"):
+        delete_a()
+    assert "op=auth result=absent" in caplog.text
+    assert_gone(fake, USER_A)
+
+
+@pytest.mark.parametrize("body", [
+    {"message": "no Route matched with those values"},
+    {"code": 404, "msg": "User not found"},
+    {"error_code": "not_found"},
+    None,
+])
+def test_auth_404_counts_as_gone_only_for_user_not_found(fake, caplog, body):
+    fake.auth_users.discard(USER_A)
+    fake.auth_404_body = body
+    with caplog.at_level(logging.WARNING, logger="app"), pytest.raises(AnalysisError) as raised:
+        delete_a()
+    assert raised.value.status_code == 503
+    assert "op=auth_delete status=404" in caplog.text
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422, 500, 503])
+def test_auth_errors_are_503(fake, status):
+    fake.fail["auth_delete"] = status
+    with pytest.raises(AnalysisError) as raised:
+        delete_a()
+    assert raised.value.status_code == 503 and USER_A in fake.auth_users
+
+
+@pytest.mark.parametrize("op, body", [
+    ("delete_rows", json.dumps([{"user_id": USER_B}]).encode()),
+    ("delete_rows", b'{"user_id": "x"}'),
+    ("delete_rows", b"not json"),
+    ("delete_usage", json.dumps([{"user_id": USER_A}, {"day": "2026-10-14"}]).encode()),
+])
+def test_unexpected_row_delete_response_stops_before_storage_and_auth(fake, op, body):
+    seed(fake, USER_A)
+    objects = owned(fake, USER_A)
+    fake.bodies[op] = body
+    with pytest.raises(AnalysisError) as raised:
+        delete_a()
+    assert raised.value.status_code == 503
+    assert owned(fake, USER_A) == objects and USER_A in fake.auth_users
+    assert lists(fake) == []
+
+
+@pytest.mark.parametrize("user_id", ["", "A", USER_A.upper(), f"{USER_A}/..", None])
+def test_delete_account_refuses_a_non_canonical_user_id_before_any_request(fake, user_id):
+    with pytest.raises(ValueError):
+        logbook.delete_account(user_id, settings())
+    assert fake.requests == []
+
+
+# --- concurrency ---------------------------------------------------------------------------
+
+
+def test_create_that_lands_just_before_the_auth_delete_is_removed_too(fake):
+    seed(fake, USER_A)
+    fake.hooks["auth_delete"] = lambda: fake.store_objects(fake.add_draft(USER_A))
+    delete_a()
+    assert_gone(fake, USER_A)  # The cascade takes the row, the final sweep its images.
+
+
+def test_create_whose_insert_comes_after_the_deletion_fails_and_cleans_up(client, fake, sdk):
+    fake.hooks["create_draft"] = delete_a  # The account is deleted between upload and insert.
+    response = create(client)
+    assert response.status_code == 503 and response.json() == UNAVAILABLE
+    assert len(fake.discards()) == 1  # Insert-failure cleanup ran: discard, then the images.
+    assert_gone(fake, USER_A)
+
+
+def test_create_whose_quota_step_comes_after_the_deletion_stores_nothing(client, fake, sdk):
+    fake.hooks["consume_gemini_call"] = delete_a
+    response = create(client)
+    assert response.status_code == 503 and sdk.call_count == 0
+    assert [r for r in fake.requests
+            if r.method == "POST" and r.url.path.startswith(f"/storage/v1/object/{BUCKET}/")] == []
+    assert_gone(fake, USER_A)
+
+
+def test_ask_racing_the_deletion_gets_503_without_gemini(client, fake, sdk):
+    experiment_id = fake.add_saved(USER_A)
+    fake.hooks["consume_gemini_call"] = delete_a  # The row was read; the account goes before the charge.
+    response = client.post(f"/v1/experiments/{experiment_id}/ask", json={"question": "What is this?"},
+                           headers=auth())
+    assert response.status_code == 503 and sdk.call_count == 0
+    assert_gone(fake, USER_A)
+
+
+def test_still_valid_token_after_deletion_can_store_nothing(client, fake, sdk):
+    experiment_id = fake.add_saved(USER_A)
+    fake.store_objects(experiment_id)
+    delete_a()
+
+    assert create(client).status_code == 503 and sdk.call_count == 0
+    assert client.post(f"/v1/experiments/{experiment_id}/ask", json={"question": "What is this?"},
+                       headers=auth()).status_code == 404
+    assert client.get("/v1/experiments", headers=auth()).json()["items"] == []
+    me = client.get("/v1/me", headers=auth())
+    assert me.status_code == 200 and me.json()["usage"]["used_today"] == 0
+    assert_gone(fake, USER_A)

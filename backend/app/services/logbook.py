@@ -278,6 +278,67 @@ def _sweep_user_objects(user_id: str, settings: Settings) -> tuple[int, int]:
     raise _unavailable("sweep", "rounds")
 
 
+def _delete_user_rows(op: str, table: str, user_id: str, settings: Settings) -> int:
+    """Delete every row of table owned by user_id; the number removed. 503 if any returned row is foreign."""
+    rows = _json(_request(op, settings, "DELETE", f"/rest/v1/{table}",
+                          params={"select": "user_id", "user_id": f"eq.{user_id}"},
+                          headers={"Prefer": "return=representation"}))
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or row.get("user_id") != user_id for row in rows):
+        raise _unavailable(op, "bad_response")
+    return len(rows)
+
+
+def _auth_error_code(response: httpx.Response) -> object:
+    body = _json(response)
+    return body.get("error_code") if isinstance(body, dict) else None
+
+
+def _delete_auth_user(user_id: str, settings: Settings) -> bool:
+    """Hard-delete the Supabase Auth user through the Admin API. True if deleted, False if already gone.
+
+    Only a 404 whose error_code is "user_not_found" counts as already gone; any other 404 (a wrong
+    route, say) or error is a 503, so a misconfiguration can never pass for a finished deletion.
+    """
+    try:
+        with _client(settings) as client:
+            response = client.request("DELETE", f"/auth/v1/admin/users/{user_id}",
+                                      headers=_auth_headers(settings), json={"should_soft_delete": False})
+    except httpx.HTTPError:
+        raise _unavailable("auth_delete", "transport") from None
+    if response.is_success:
+        return True
+    if response.status_code == 404 and _auth_error_code(response) == "user_not_found":
+        return False
+    raise _unavailable("auth_delete", response.status_code)
+
+
+def delete_account(user_id: str, settings: Settings) -> None:
+    """Permanently delete the user's logbook data and Supabase Auth user. 503 (AnalysisError) if a step fails.
+
+    Order: experiments and usage_daily rows, a sweep of every object under "<uid>/", the Auth
+    user, then a final sweep for objects a create still running may have uploaded meanwhile.
+    A failed step stops the rest. Every step is safe to repeat (no rows, an empty folder, an
+    Auth user that is already gone), so a retry with the same access token, still valid until it
+    expires, finishes a half-deleted account. The Auth user goes last because, once it is gone,
+    sessions cannot be refreshed; from then on the FKs to auth.users reject any new row or quota use.
+    """
+    if not user_id or _canonical_id(user_id) != user_id:
+        raise ValueError("user_id must be a canonical UUID.")
+    experiments = _delete_user_rows("delete_rows", "experiments", user_id, settings)
+    usage = _delete_user_rows("delete_usage", "usage_daily", user_id, settings)
+    logger.info("Account deletion op=rows experiments=%s usage=%s", experiments, usage)
+    deleted, rounds = _sweep_user_objects(user_id, settings)
+    logger.info("Account deletion op=objects deleted=%s rounds=%s", deleted, rounds)
+    removed = _delete_auth_user(user_id, settings)
+    logger.info("Account deletion op=auth result=%s", "deleted" if removed else "absent")
+    try:
+        deleted, rounds = _sweep_user_objects(user_id, settings)
+    except AnalysisError:
+        logger.warning("Account deletion failed op=final_sweep")
+        raise
+    logger.info("Account deletion op=final_sweep deleted=%s rounds=%s", deleted, rounds)
+
+
 def insert_experiment(user_id: str, row: dict[str, Any], settings: Settings) -> Any:
     """Create a draft owned by user_id through create_draft (migration 0002).
 
