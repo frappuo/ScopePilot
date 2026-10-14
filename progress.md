@@ -3,6 +3,36 @@
 Dated log, newest first. Current status, planned features, and known issues
 live in `docs/HANDOFF.md`.
 
+## Logbook PR 6 account deletion (2026-10-14)
+
+- `DELETE /v1/me` with the body `{"confirm": "DELETE MY ACCOUNT"}` gives 204,
+  or 503 "Account deletion did not finish. Please try again." Any other body
+  gives 422 with no Supabase request.
+- Order: experiment rows, then a sweep of the user's whole storage folder
+  (orphans included), then the Supabase Auth user, then a final sweep.
+  `usage_daily` goes by the cascade with the Auth user, so a failed deletion
+  keeps the day's quota.
+- Every step is safe to repeat. The app keeps its session on 503 and retries;
+  it signs out only on 204. No migration.
+- The Supabase test fake moved to `backend/tests/fake_supabase.py`. Backend
+  suite: 615 passed, 1 skipped, all mocked.
+- Live check (user-reported; backend run locally against the real Supabase
+  project, throwaway user C, control user A):
+  - C had 2 experiments, 3 quota units and 6 files, including loose and
+    nested orphans.
+  - No body 422, wrong-case phrase 422, correct phrase 204.
+  - Logs: `rows experiments=2`, `objects deleted=6 rounds=2`,
+    `auth result=deleted`, `final_sweep deleted=0`; counts only.
+  - A repeat delete gave 204 with `auth result=absent` (`user_not_found`).
+  - The Auth Admin API accepts the secret key in `apikey` alone.
+  - By SQL afterwards: C has no experiments, usage rows, Auth user or files;
+    A's 2 files are untouched; 2 users in total.
+  - C's old token: create gives 503 (`consume_quota status=409`, no Gemini
+    call); C can no longer sign in (400).
+- Not verified: deletion from Render and its timing.
+- Next: PR 7 (legacy switch), then the app's login and logbook screens.
+  Configure custom SMTP before real users sign up.
+
 ## Logbook PR 4-5 live check (2026-10-12)
 
 User-reported; backend run locally against the real Supabase project and real
