@@ -22,6 +22,7 @@ from PIL import Image
 from app.config import Settings
 from app.main import app
 from app.services import gemini, logbook
+from app.services.auth import AuthenticatedUser
 from app.services.errors import AnalysisError
 
 from fake_supabase import (
@@ -243,6 +244,52 @@ def test_non_canonical_user_id_is_refused_before_any_request(fake, user_id):
     assert fake.requests == []
 
 
+def test_an_empty_folder_entry_alone_counts_as_done(fake):
+    fake.empty_folders = {f"{USER_A}/ghost/"}
+    assert sweep() == (0, 1)
+    assert deletes(fake) == []
+
+
+def test_empty_folder_entries_left_after_deleting_files_count_as_done(fake):
+    populate(fake, USER_A)
+    fake.empty_folders = {f"{USER_A}/ghost/", f"{USER_A}/a/empty/"}
+    deleted, rounds = sweep()
+    assert deleted == len(populate_paths(USER_A)) and rounds == 2
+    assert owned(fake, USER_A) == {}
+
+
+def populate_paths(user_id):
+    fake = FakeSupabase()
+    populate(fake, user_id)
+    return list(fake.objects)
+
+
+def test_files_behind_more_than_a_page_of_empty_folders_are_found(fake):
+    fake.empty_folders = {f"{USER_A}/a{index:03}/" for index in range(logbook.SWEEP_PAGE + 50)}
+    fake.objects[f"{USER_A}/zzz/image.jpg"] = b"x"
+    fake.objects[f"{USER_A}/zzz/thumb.jpg"] = b"x"
+    populate(fake, USER_B)
+    others = owned(fake, USER_B)
+
+    assert sweep() == (2, 2)
+
+    assert owned(fake, USER_A) == {} and owned(fake, USER_B) == others
+    root_offsets = [json_body(r)["offset"] for r in lists(fake) if json_body(r)["prefix"] == f"{USER_A}/"]
+    assert logbook.SWEEP_PAGE in root_offsets  # The complete pass read past the first page.
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_a_file_still_listed_after_its_delete_is_503_even_behind_empty_folders(fake, caplog):
+    fake.empty_folders = {f"{USER_A}/a{index:03}/" for index in range(logbook.SWEEP_PAGE + 50)}
+    fake.objects[f"{USER_A}/zzz/image.jpg"] = b"x"
+    fake.delete_noop = True
+    with caplog.at_level(logging.WARNING, logger="app"), pytest.raises(AnalysisError) as raised:
+        sweep()
+    assert raised.value.status_code == 503
+    assert "op=sweep status=no_progress" in caplog.text
+    assert len(deletes(fake)) == 1
+
+
 def assert_logs_clean(caplog):
     for secret in (USER_A, USER_B, SECRET, "stray.jpg", "deep.jpg"):
         assert secret not in caplog.text
@@ -326,11 +373,11 @@ def test_delete_account_removes_everything_for_that_user_only(fake, caplog):
     assert_gone(fake, USER_A)
     assert state(fake, USER_B) == others
     assert_scoped(fake.requests, USER_A, USER_B)
-    assert ops(fake) == ["delete_rows", "delete_usage", "list_objects", "delete", "list_objects",
+    assert ops(fake) == ["delete_rows", "list_objects", "delete", "list_objects",
                          "auth_delete", "list_objects"]
     assert all(request.headers["apikey"] == SECRET and "authorization" not in request.headers
                for request in fake.requests)
-    assert "Account deletion op=rows experiments=3 usage=2" in caplog.text
+    assert "Account deletion op=rows experiments=3" in caplog.text
     assert "Account deletion op=objects deleted=8 rounds=2" in caplog.text
     assert "Account deletion op=auth result=deleted" in caplog.text
     assert "Account deletion op=final_sweep deleted=0 rounds=1" in caplog.text
@@ -342,24 +389,23 @@ def test_repeat_delete_after_success_is_a_quiet_no_op(fake, caplog):
     delete_a()
     with caplog.at_level(logging.INFO, logger="app"):
         delete_a()
-    assert "op=rows experiments=0 usage=0" in caplog.text
+    assert "op=rows experiments=0" in caplog.text
     assert "op=auth result=absent" in caplog.text
     assert all(record.levelno < logging.WARNING for record in caplog.records)
     assert_gone(fake, USER_A)
 
 
 # What each failed step leaves: (experiment rows, usage rows, objects, Auth user) still present.
+# usage_daily goes only by the cascade with the Auth user.
 @pytest.mark.parametrize("op, failure, left", [
     ("delete_rows", 500, (True, True, True, True)),
     ("delete_rows", "transport", (True, True, True, True)),
     ("delete_rows", "after_commit", (False, True, True, True)),
-    ("delete_usage", 500, (False, True, True, True)),
-    ("delete_usage", "after_commit", (False, False, True, True)),
-    ("list_objects", 500, (False, False, True, True)),
-    ("list_objects", "transport", (False, False, True, True)),
-    ("delete", 500, (False, False, True, True)),
-    ("auth_delete", 500, (False, False, False, True)),
-    ("auth_delete", "transport", (False, False, False, True)),
+    ("list_objects", 500, (False, True, True, True)),
+    ("list_objects", "transport", (False, True, True, True)),
+    ("delete", 500, (False, True, True, True)),
+    ("auth_delete", 500, (False, True, False, True)),
+    ("auth_delete", "transport", (False, True, False, True)),
     ("auth_delete", "after_commit", (False, False, False, False)),
 ])
 def test_failed_step_stops_the_rest_and_a_retry_finishes(fake, caplog, op, failure, left):
@@ -427,16 +473,16 @@ def test_auth_errors_are_503(fake, status):
     assert raised.value.status_code == 503 and USER_A in fake.auth_users
 
 
-@pytest.mark.parametrize("op, body", [
-    ("delete_rows", json.dumps([{"user_id": USER_B}]).encode()),
-    ("delete_rows", b'{"user_id": "x"}'),
-    ("delete_rows", b"not json"),
-    ("delete_usage", json.dumps([{"user_id": USER_A}, {"day": "2026-10-14"}]).encode()),
+@pytest.mark.parametrize("body", [
+    json.dumps([{"user_id": USER_B}]).encode(),
+    json.dumps([{"user_id": USER_A}, {"id": "x"}]).encode(),
+    b'{"user_id": "x"}',
+    b"not json",
 ])
-def test_unexpected_row_delete_response_stops_before_storage_and_auth(fake, op, body):
+def test_unexpected_row_delete_response_stops_before_storage_and_auth(fake, body):
     seed(fake, USER_A)
     objects = owned(fake, USER_A)
-    fake.bodies[op] = body
+    fake.delete_rows_body = body
     with pytest.raises(AnalysisError) as raised:
         delete_a()
     assert raised.value.status_code == 503
@@ -499,3 +545,143 @@ def test_still_valid_token_after_deletion_can_store_nothing(client, fake, sdk):
     me = client.get("/v1/me", headers=auth())
     assert me.status_code == 200 and me.json()["usage"]["used_today"] == 0
     assert_gone(fake, USER_A)
+
+
+# --- DELETE /v1/me -------------------------------------------------------------------------
+
+
+CONFIRM = {"confirm": "DELETE MY ACCOUNT"}
+UNFINISHED = {"detail": "Account deletion did not finish. Please try again."}
+
+
+def delete_me(client, user="A", **kwargs):
+    kwargs.setdefault("json", CONFIRM)
+    return client.request("DELETE", "/v1/me", headers=auth(user) if user else {}, **kwargs)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"json": None},  # No body at all.
+    {"json": {}},
+    {"json": {"confirm": "DELETE"}},
+    {"json": {"confirm": "delete my account"}},
+    {"json": {"confirm": " DELETE MY ACCOUNT"}},
+    {"json": {"confirm": "DELETE MY ACCOUNT", "user_id": USER_B}},
+    {"json": {"confirm": True}},
+    {"json": ["DELETE MY ACCOUNT"]},
+    {"json": None, "content": b"DELETE MY ACCOUNT", "headers_extra": {"content-type": "text/plain"}},
+    {"json": None, "content": b'{"confirm": "DELETE MY ACCOUNT"', "headers_extra": {"content-type": "application/json"}},
+])
+def test_without_the_exact_confirmation_nothing_is_deleted(client, fake, kwargs):
+    seed(fake, USER_A)
+    before = state(fake, USER_A)
+    headers = {**auth(), **kwargs.pop("headers_extra", {})}
+    response = client.request("DELETE", "/v1/me", headers=headers, **kwargs)
+    assert response.status_code == 422
+    assert fake.requests == []
+    assert state(fake, USER_A) == before
+
+
+def test_delete_without_a_token_is_401_and_touches_nothing(client, fake):
+    response = delete_me(client, user=None)
+    assert response.status_code == 401 and response.headers["www-authenticate"] == "Bearer"
+    assert fake.requests == [] and USER_A in fake.auth_users
+
+
+def test_delete_when_the_logbook_is_not_configured_is_503(client, fake):
+    use_settings(supabase_url="", supabase_secret_key="")
+    response = delete_me(client)
+    assert response.status_code == 503 and response.json() == {"detail": "Logbook not configured."}
+    assert fake.requests == []
+
+
+def test_delete_me_removes_the_account_end_to_end(client, fake):
+    seed(fake, USER_A)
+    seed(fake, USER_B)
+    others = state(fake, USER_B)
+
+    response = delete_me(client)
+
+    assert response.status_code == 204 and response.content == b""
+    assert_gone(fake, USER_A)
+    assert state(fake, USER_B) == others
+    assert_scoped(fake.requests, USER_A, USER_B)
+
+
+def test_repeat_delete_me_is_204(client, fake):
+    seed(fake, USER_A)
+    assert delete_me(client).status_code == 204
+    assert delete_me(client).status_code == 204
+    assert_gone(fake, USER_A)
+
+
+@pytest.mark.parametrize("op", ["delete_rows", "list_objects", "auth_delete"])
+def test_unfinished_delete_is_503_and_the_same_token_finishes_it(client, fake, op):
+    seed(fake, USER_A)
+    fake.fail[op] = 500
+    response = delete_me(client)
+    assert response.status_code == 503 and response.json() == UNFINISHED
+
+    fake.fail.clear()
+    assert delete_me(client).status_code == 204
+    assert_gone(fake, USER_A)
+
+
+def test_after_delete_me_the_old_token_can_store_nothing(client, fake, sdk):
+    experiment_id = fake.add_saved(USER_A)
+    fake.store_objects(experiment_id)
+    assert delete_me(client).status_code == 204
+
+    assert create(client).status_code == 503 and sdk.call_count == 0
+    assert client.post(f"/v1/experiments/{experiment_id}/ask", json={"question": "What is this?"},
+                       headers=auth()).status_code == 404
+    me = client.get("/v1/me", headers=auth())
+    assert me.status_code == 200 and me.json()["usage"]["used_today"] == 0
+    assert_gone(fake, USER_A)
+
+
+def test_delete_me_logs_no_ids_emails_paths_or_secrets(client, fake, monkeypatch, caplog):
+    email = "student@example.com"
+    monkeypatch.setattr("app.middleware.verify_access_token",
+                        lambda token, url: AuthenticatedUser(user_id=USER_A, email=email))
+    seed(fake, USER_A)
+    fake.fail["auth_delete"] = 500
+    with caplog.at_level(logging.INFO):
+        assert delete_me(client).status_code == 503
+        fake.fail.clear()
+        assert delete_me(client).status_code == 204
+    # Only app.* loggers: the test client's own httpx logger prints the URLs it requested.
+    app_lines = [record.getMessage() for record in caplog.records if record.name.startswith("app")]
+    assert any("op=auth_delete status=500" in line for line in app_lines)
+    assert any("Account deletion op=auth result=deleted" in line for line in app_lines)
+    for secret in (USER_A, email, SECRET, "token-A", "stray.jpg", "deep.jpg", "image.jpg", BUCKET):
+        assert not any(secret in line for line in app_lines), secret
+
+
+def test_supabase_never_receives_the_users_bearer_token(client, fake):
+    seed(fake, USER_A)
+    assert delete_me(client).status_code == 204
+    assert fake.requests
+    for request in fake.requests:
+        assert "authorization" not in request.headers
+        assert "token-A" not in str(request.headers) and b"token-A" not in request.content
+        assert request.headers["apikey"] == SECRET
+
+
+def test_delete_me_with_only_an_empty_folder_entry_left_is_204(client, fake):
+    seed(fake, USER_A)
+    fake.empty_folders = {f"{USER_A}/ghost/"}
+    assert delete_me(client).status_code == 204
+    assert_gone(fake, USER_A)
+
+
+@pytest.mark.parametrize("op", ["list_objects", "delete", "auth_delete"])
+def test_failed_delete_after_the_row_step_keeps_the_days_quota(client, fake, op):
+    seed(fake, USER_A)
+    usage = state(fake, USER_A)["usage"]
+    fake.fail[op] = 500
+
+    assert delete_me(client).status_code == 503
+
+    assert state(fake, USER_A)["usage"] == usage
+    assert client.get("/v1/me", headers=auth()).json()["usage"]["used_today"] == 3
+    assert not any(r.method == "DELETE" and r.url.path == "/rest/v1/usage_daily" for r in fake.requests)

@@ -39,9 +39,10 @@ CREATE_DEADLINE_SECONDS = SUPABASE_TIMEOUT_SECONDS - 2  # create_draft writes no
 DISCARD_MARGIN_SECONDS = 2
 PURGE_BATCH = 5
 PURGE_GRACE = timedelta(minutes=5)  # Clock-skew margin between this host and the database.
-# Account sweep of "<uid>/": a round lists one page of the user's folder and the folders in it,
-# then deletes what it found; the next round lists from offset 0 again, so deletes never shift
-# a page. Bounded, so one request cannot run on; a 503 leaves the rest for a retry.
+# Account sweep of "<uid>/": a round lists the first page of the user's folder and the folders in
+# it, then deletes what it found; the next round lists from offset 0 again, so deletes never shift
+# a page. A round that finds only folders pages through everything before calling the folder
+# empty. Bounded, so one request cannot run on; a 503 leaves the rest for a retry.
 SWEEP_PAGE = 100
 SWEEP_DELETE_BATCH = 100  # Storage accepts up to 1000 paths per delete.
 SWEEP_MAX_DEPTH = 3  # Folder levels below "<uid>/"; today's layout uses one (<uid>/<id>/file).
@@ -209,15 +210,15 @@ def delete_objects(user_id: str, paths: list[str], settings: Settings) -> None:
              json={"prefixes": list(paths)})
 
 
-def _list_folder(user_id: str, folder: str, settings: Settings) -> tuple[list[str], list[str]]:
-    """(files, subfolders) in one page of folder, as full paths under "<uid>/".
+def _list_folder(user_id: str, folder: str, offset: int, settings: Settings) -> tuple[list[str], list[str]]:
+    """(files, subfolders) in the page of folder at offset, as full paths under "<uid>/".
 
     Storage's list is one level deep: a folder entry has a null id. Every name is checked before
     it is joined, so a listing can never steer a path outside the user's prefix.
     """
     _check_paths(user_id, [folder])
     entries = _json(_request("list_objects", settings, "POST", f"/storage/v1/object/list/{settings.logbook_bucket}",
-                             json={"prefix": folder, "limit": SWEEP_PAGE, "offset": 0,
+                             json={"prefix": folder, "limit": SWEEP_PAGE, "offset": offset,
                                    "sortBy": {"column": "name", "order": "asc"}}))
     if not isinstance(entries, list) or len(entries) > SWEEP_PAGE:
         raise _unavailable("list_objects", "bad_response")
@@ -239,36 +240,62 @@ def _list_folder(user_id: str, folder: str, settings: Settings) -> tuple[list[st
     return files, folders
 
 
+def _sweep_pass(user_id: str, complete: bool, deadline: float, settings: Settings) -> tuple[list[str], bool]:
+    """(files found, whether "<uid>/" listed empty) from one pass over the user's folder tree.
+
+    A quick pass reads only the first page of each folder. A complete pass reads every folder
+    with increasing offsets until a page comes back short, so nothing past the first page is missed.
+    Nothing is deleted during a pass, so its offsets stay valid.
+    """
+    root = f"{user_id}/"
+    found: list[str] = []
+    pending = [(root, 0)]
+    while pending:
+        folder, depth = pending.pop()
+        if depth > SWEEP_MAX_DEPTH:
+            raise _unavailable("sweep", "too_deep")
+        offset = 0
+        while True:
+            if monotonic() > deadline:
+                raise _unavailable("sweep", "budget")
+            files, folders = _list_folder(user_id, folder, offset, settings)
+            if folder == root and offset == 0 and not files and not folders:
+                return [], True
+            found.extend(files)
+            pending.extend((sub, depth + 1) for sub in folders)
+            if not complete or len(files) + len(folders) < SWEEP_PAGE:
+                break
+            offset += SWEEP_PAGE
+    return list(dict.fromkeys(found)), False
+
+
 def _sweep_user_objects(user_id: str, settings: Settings) -> tuple[int, int]:
     """Delete every object under "<uid>/", including orphans no row lists. Returns (deleted, rounds).
 
-    Repeats list-then-delete until the user's folder lists empty. Raises 503 (AnalysisError) if
-    a listing is malformed, a folder is nested deeper than SWEEP_MAX_DEPTH, a round finds only
-    paths it already deleted (no progress), or SWEEP_MAX_ROUNDS or SWEEP_BUDGET_SECONDS run out.
-    Safe to repeat: what is already gone is simply not listed again.
+    Each round makes a quick pass and deletes the files it found. The sweep is done when the
+    user's folder lists empty, or when a round's quick pass finds only folders and a complete
+    paginated pass then finds no file anywhere: Storage can list a folder that holds nothing,
+    which must not block a deletion. Raises 503 (AnalysisError) if a listing is malformed, a
+    folder is nested deeper than SWEEP_MAX_DEPTH, a pass finds only paths already deleted (no
+    progress), or SWEEP_MAX_ROUNDS or SWEEP_BUDGET_SECONDS run out. Safe to repeat: what is
+    already gone is simply not listed again.
     """
     if not user_id or _canonical_id(user_id) != user_id:
         raise ValueError("user_id must be a canonical UUID.")
-    root = f"{user_id}/"
     deadline = monotonic() + SWEEP_BUDGET_SECONDS
     requested: set[str] = set()
     for round_number in range(1, SWEEP_MAX_ROUNDS + 1):
-        found: list[str] = []
-        pending = [(root, 0)]
-        while pending:
-            folder, depth = pending.pop()
-            if depth > SWEEP_MAX_DEPTH:
-                raise _unavailable("sweep", "too_deep")
-            if monotonic() > deadline:
-                raise _unavailable("sweep", "budget")
-            files, folders = _list_folder(user_id, folder, settings)
-            found.extend(files)
-            pending.extend((sub, depth + 1) for sub in folders)
-            if folder == root and not files and not folders:
+        found, empty = _sweep_pass(user_id, False, deadline, settings)
+        if empty:
+            return len(requested), round_number
+        if not found:
+            # Only folders on the first pages: files may sit past a first page or under one of them.
+            found, _ = _sweep_pass(user_id, True, deadline, settings)
+            if not found:
                 return len(requested), round_number
-        fresh = [path for path in dict.fromkeys(found) if path not in requested]
+        fresh = [path for path in found if path not in requested]
         if not fresh:
-            # Listed but nothing new to delete: an earlier delete did not take, or only folders remain.
+            # Files listed again after their delete was requested: the delete did not take.
             raise _unavailable("sweep", "no_progress")
         for start in range(0, len(fresh), SWEEP_DELETE_BATCH):
             if monotonic() > deadline:
@@ -278,13 +305,13 @@ def _sweep_user_objects(user_id: str, settings: Settings) -> tuple[int, int]:
     raise _unavailable("sweep", "rounds")
 
 
-def _delete_user_rows(op: str, table: str, user_id: str, settings: Settings) -> int:
-    """Delete every row of table owned by user_id; the number removed. 503 if any returned row is foreign."""
-    rows = _json(_request(op, settings, "DELETE", f"/rest/v1/{table}",
+def _delete_user_experiments(user_id: str, settings: Settings) -> int:
+    """Delete every experiment row owned by user_id; the number removed. 503 if any returned row is foreign."""
+    rows = _json(_request("delete_rows", settings, "DELETE", "/rest/v1/experiments",
                           params={"select": "user_id", "user_id": f"eq.{user_id}"},
                           headers={"Prefer": "return=representation"}))
     if not isinstance(rows, list) or any(not isinstance(row, dict) or row.get("user_id") != user_id for row in rows):
-        raise _unavailable(op, "bad_response")
+        raise _unavailable("delete_rows", "bad_response")
     return len(rows)
 
 
@@ -315,18 +342,19 @@ def _delete_auth_user(user_id: str, settings: Settings) -> bool:
 def delete_account(user_id: str, settings: Settings) -> None:
     """Permanently delete the user's logbook data and Supabase Auth user. 503 (AnalysisError) if a step fails.
 
-    Order: experiments and usage_daily rows, a sweep of every object under "<uid>/", the Auth
-    user, then a final sweep for objects a create still running may have uploaded meanwhile.
-    A failed step stops the rest. Every step is safe to repeat (no rows, an empty folder, an
-    Auth user that is already gone), so a retry with the same access token, still valid until it
-    expires, finishes a half-deleted account. The Auth user goes last because, once it is gone,
-    sessions cannot be refreshed; from then on the FKs to auth.users reject any new row or quota use.
+    Order: experiment rows, a sweep of every object under "<uid>/", the Auth user, then a final
+    sweep for objects a create still running may have uploaded meanwhile. usage_daily rows go by
+    the on-delete cascade with the Auth user, so a deletion that fails earlier leaves the day's
+    quota count in place. A failed step stops the rest. Every step is safe to repeat (no rows,
+    an empty folder, an Auth user that is already gone), so a retry with the same access token,
+    still valid until it expires, finishes a half-deleted account. The Auth user goes last
+    because, once it is gone, sessions cannot be refreshed; from then on the FKs to auth.users
+    reject any new row or quota use.
     """
     if not user_id or _canonical_id(user_id) != user_id:
         raise ValueError("user_id must be a canonical UUID.")
-    experiments = _delete_user_rows("delete_rows", "experiments", user_id, settings)
-    usage = _delete_user_rows("delete_usage", "usage_daily", user_id, settings)
-    logger.info("Account deletion op=rows experiments=%s usage=%s", experiments, usage)
+    experiments = _delete_user_experiments(user_id, settings)
+    logger.info("Account deletion op=rows experiments=%s", experiments)
     deleted, rounds = _sweep_user_objects(user_id, settings)
     logger.info("Account deletion op=objects deleted=%s rounds=%s", deleted, rounds)
     removed = _delete_auth_user(user_id, settings)

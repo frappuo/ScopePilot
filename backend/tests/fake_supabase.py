@@ -65,7 +65,9 @@ class FakeSupabase:
         self.list_objects_body: bytes | None = None  # Raw 200 body for the storage list; None lists objects.
         self.auth_users: set[str] = {USER_A, USER_B}
         self.auth_404_body = {"code": 404, "error_code": "user_not_found", "msg": "User not found"}
-        self.bodies: dict[str, bytes] = {}  # Raw 200 bodies for delete_rows / delete_usage; else the rows.
+        self.delete_rows_body: bytes | None = None  # Raw 200 body for the account-wide experiments DELETE.
+        # Folder paths ("<uid>/x/") that Storage lists as folders although no object is under them.
+        self.empty_folders: set[str] = set()
 
     def add_draft(self, user_id, expires_in=timedelta(hours=1), created_at=None, **fields):
         experiment_id = str(uuid.uuid4())
@@ -134,10 +136,12 @@ class FakeSupabase:
         prefix = body["prefix"]
         assert prefix.endswith("/") and body["sortBy"] == {"column": "name", "order": "asc"}
         entries: dict[str, dict] = {}
-        for key in self.objects:
+        for key in [*self.objects, *self.empty_folders]:
             if not key.startswith(prefix):
                 continue
             name, slash, _ = key.removeprefix(prefix).partition("/")
+            if not name:  # An empty folder listing itself: nothing in it.
+                continue
             entries[name] = {"name": name, "id": None, "metadata": None} if slash else \
                 {"name": name, "id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)), "metadata": {"size": 1}}
         page = sorted(entries.values(), key=lambda e: e["name"])[body["offset"]:body["offset"] + body["limit"]]
@@ -231,25 +235,20 @@ class FakeSupabase:
     def _fk_violation():
         return httpx.Response(409, json={"code": "23503", "message": "violates foreign key constraint"})
 
-    def _delete_owned(self, op, request, params, table):
-        """DELETE ... ?user_id=eq.<uid> on experiments or usage_daily, returning {"user_id": ...} per row."""
+    def _delete_user_rows(self, request, params):
+        """DELETE /rest/v1/experiments?user_id=eq.<uid>, returning {"user_id": ...} per row removed."""
         assert params["select"] == "user_id" and request.headers.get("prefer") == "return=representation"
-        committed_then_lost = self.fail.get(op) == "after_commit"
-        failure = None if committed_then_lost else self._failure(op, request)
+        committed_then_lost = self.fail.get("delete_rows") == "after_commit"
+        failure = None if committed_then_lost else self._failure("delete_rows", request)
         if failure:
             return failure
-        if table == "experiments":
-            found = [key for key, row in self.rows.items() if f"eq.{row['user_id']}" == params["user_id"]]
-            for key in found:
-                del self.rows[key]
-        else:
-            found = [key for key in self.usage if f"eq.{key[0]}" == params["user_id"]]
-            for key in found:
-                del self.usage[key]
+        found = [key for key, row in self.rows.items() if f"eq.{row['user_id']}" == params["user_id"]]
+        for key in found:
+            del self.rows[key]
         if committed_then_lost:
             raise httpx.ReadTimeout("fake lost response", request=request)
-        if op in self.bodies:
-            return httpx.Response(200, content=self.bodies[op])
+        if self.delete_rows_body is not None:
+            return httpx.Response(200, content=self.delete_rows_body)
         return httpx.Response(200, json=[{"user_id": params["user_id"].removeprefix("eq.")} for _ in found])
 
     def _delete_auth_user(self, request, user_id, body):
@@ -274,7 +273,7 @@ class FakeSupabase:
         if path.startswith("/rest/v1/rpc/"):
             return path.removeprefix("/rest/v1/rpc/")
         if path == "/rest/v1/usage_daily":
-            return "delete_usage" if method == "DELETE" else "usage"
+            return "usage"
         if path.startswith("/auth/v1/admin/users/"):
             return "auth_delete"
         if path == f"/storage/v1/object/list/{BUCKET}":
@@ -324,9 +323,7 @@ class FakeSupabase:
                 self.usage[key] = self.usage.get(key, 0) + 1
             return httpx.Response(200, content=self.quota_body, headers={"content-type": "application/json"})
         if op == "delete_rows":
-            return self._delete_owned(op, request, params, "experiments")
-        if op == "delete_usage":
-            return self._delete_owned(op, request, params, "usage_daily")
+            return self._delete_user_rows(request, params)
         if op == "auth_delete":
             assert method == "DELETE"
             return self._delete_auth_user(request, path.removeprefix("/auth/v1/admin/users/"), body)

@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class DailyUsage(BaseModel):
@@ -18,3 +19,11 @@ class MeResponse(BaseModel):
     user_id: str
     email: str | None
     usage: DailyUsage | None
+
+
+class AccountDeleteRequest(BaseModel):
+    """Body of DELETE /v1/me. The exact phrase guards against a stray request, not a stolen token."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: Literal["DELETE MY ACCOUNT"]
