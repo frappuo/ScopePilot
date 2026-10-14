@@ -11,7 +11,7 @@ from datetime import datetime, time, timedelta, timezone
 import json
 import logging
 import math
-from time import sleep
+from time import monotonic, sleep
 from typing import Any
 import uuid
 
@@ -39,6 +39,14 @@ CREATE_DEADLINE_SECONDS = SUPABASE_TIMEOUT_SECONDS - 2  # create_draft writes no
 DISCARD_MARGIN_SECONDS = 2
 PURGE_BATCH = 5
 PURGE_GRACE = timedelta(minutes=5)  # Clock-skew margin between this host and the database.
+# Account sweep of "<uid>/": a round lists one page of the user's folder and the folders in it,
+# then deletes what it found; the next round lists from offset 0 again, so deletes never shift
+# a page. Bounded, so one request cannot run on; a 503 leaves the rest for a retry.
+SWEEP_PAGE = 100
+SWEEP_DELETE_BATCH = 100  # Storage accepts up to 1000 paths per delete.
+SWEEP_MAX_DEPTH = 3  # Folder levels below "<uid>/"; today's layout uses one (<uid>/<id>/file).
+SWEEP_MAX_ROUNDS = 50
+SWEEP_BUDGET_SECONDS = 25
 EXPERIMENT_COLUMNS = (
     "id,user_id,status,title,notes,analysis,created_at,updated_at,saved_at,expires_at,image_path,thumb_path"
 )
@@ -199,6 +207,75 @@ def delete_objects(user_id: str, paths: list[str], settings: Settings) -> None:
     # client.request, not client.delete: httpx's delete() cannot send a body.
     _request("delete_objects", settings, "DELETE", f"/storage/v1/object/{settings.logbook_bucket}",
              json={"prefixes": list(paths)})
+
+
+def _list_folder(user_id: str, folder: str, settings: Settings) -> tuple[list[str], list[str]]:
+    """(files, subfolders) in one page of folder, as full paths under "<uid>/".
+
+    Storage's list is one level deep: a folder entry has a null id. Every name is checked before
+    it is joined, so a listing can never steer a path outside the user's prefix.
+    """
+    _check_paths(user_id, [folder])
+    entries = _json(_request("list_objects", settings, "POST", f"/storage/v1/object/list/{settings.logbook_bucket}",
+                             json={"prefix": folder, "limit": SWEEP_PAGE, "offset": 0,
+                                   "sortBy": {"column": "name", "order": "asc"}}))
+    if not isinstance(entries, list) or len(entries) > SWEEP_PAGE:
+        raise _unavailable("list_objects", "bad_response")
+    files: list[str] = []
+    folders: list[str] = []
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+            raise _unavailable("list_objects", "bad_name")
+        path = f"{folder}{name}"
+        try:
+            _check_paths(user_id, [path])
+        except LogbookPathError:
+            raise _unavailable("list_objects", "bad_name") from None
+        if entry.get("id") is None:
+            folders.append(f"{path}/")
+        else:
+            files.append(path)
+    return files, folders
+
+
+def _sweep_user_objects(user_id: str, settings: Settings) -> tuple[int, int]:
+    """Delete every object under "<uid>/", including orphans no row lists. Returns (deleted, rounds).
+
+    Repeats list-then-delete until the user's folder lists empty. Raises 503 (AnalysisError) if
+    a listing is malformed, a folder is nested deeper than SWEEP_MAX_DEPTH, a round finds only
+    paths it already deleted (no progress), or SWEEP_MAX_ROUNDS or SWEEP_BUDGET_SECONDS run out.
+    Safe to repeat: what is already gone is simply not listed again.
+    """
+    if not user_id or _canonical_id(user_id) != user_id:
+        raise ValueError("user_id must be a canonical UUID.")
+    root = f"{user_id}/"
+    deadline = monotonic() + SWEEP_BUDGET_SECONDS
+    requested: set[str] = set()
+    for round_number in range(1, SWEEP_MAX_ROUNDS + 1):
+        found: list[str] = []
+        pending = [(root, 0)]
+        while pending:
+            folder, depth = pending.pop()
+            if depth > SWEEP_MAX_DEPTH:
+                raise _unavailable("sweep", "too_deep")
+            if monotonic() > deadline:
+                raise _unavailable("sweep", "budget")
+            files, folders = _list_folder(user_id, folder, settings)
+            found.extend(files)
+            pending.extend((sub, depth + 1) for sub in folders)
+            if folder == root and not files and not folders:
+                return len(requested), round_number
+        fresh = [path for path in dict.fromkeys(found) if path not in requested]
+        if not fresh:
+            # Listed but nothing new to delete: an earlier delete did not take, or only folders remain.
+            raise _unavailable("sweep", "no_progress")
+        for start in range(0, len(fresh), SWEEP_DELETE_BATCH):
+            if monotonic() > deadline:
+                raise _unavailable("sweep", "budget")
+            delete_objects(user_id, fresh[start:start + SWEEP_DELETE_BATCH], settings)
+            requested.update(fresh[start:start + SWEEP_DELETE_BATCH])
+    raise _unavailable("sweep", "rounds")
 
 
 def insert_experiment(user_id: str, row: dict[str, Any], settings: Settings) -> Any:
