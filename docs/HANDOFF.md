@@ -24,7 +24,7 @@ The AI is assistive and tentative; the student remains responsible for verifying
 -   FastAPI backend with Gemini; upload validation and re-encoding (section 5); structured, Pydantic-validated responses; the app shows the backend's `detail` for 400/413/415 only.
 -   Optional Gemini model fallback on quota or model-not-found (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model.
 -   Request limits (body size, `/ask`/`/quiz` input caps, global daily Gemini cap) and an optional shared app token (`APP_TOKEN`; a deterrent, not authentication).
--   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete, experiment-scoped follow-up questions and quiz, daily usage in `GET /v1/me`; section 5). No login or logbook screens in the app yet.
+-   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete, experiment-scoped follow-up questions and quiz, daily usage in `GET /v1/me`, account deletion with `DELETE /v1/me`; section 5). No login or logbook screens in the app yet.
 -   Braintrust prompt-evaluation harness with four variants and deterministic scorers.
 
 ### Verified on a physical device (user-reported)
@@ -51,7 +51,6 @@ Do not describe planned features as implemented.
 
 None of the following exists in the code. Remaining logbook PRs, in order:
 
--   PR 6: account deletion.
 -   PR 7: legacy switch.
 -   Then the frontend login and experiments screens (no login in the app today).
 -   Later assistant features: cross-experiment context, learning tracking.
@@ -101,6 +100,7 @@ Layout: `routes/` = HTTP only, `schemas/` = Pydantic, `services/` = Gemini and b
 | `/ask` | POST | Answer a follow-up using the analysis context. |
 | `/quiz` | POST | Generate quiz questions from the analysis context. |
 | `/v1/me` | GET | The signed-in user (Supabase token) and today's per-user Gemini usage (`usage`, or null if it could not be read). |
+| `/v1/me` | DELETE | Permanently delete the signed-in account and all its logbook data (body `{"confirm": "DELETE MY ACCOUNT"}`). |
 | `/v1/experiments` | POST, GET | Create a draft from an image; list own saved experiments and live drafts. |
 | `/v1/experiments/{id}` | GET, PATCH, DELETE | Read; edit title/notes and save a draft; delete. |
 | `/v1/experiments/{id}/ask` | POST | Answer a follow-up question from the experiment's stored analysis. |
@@ -136,9 +136,9 @@ Details in README.md. Not covered there:
 
 Steps are in README.md. iPhone camera JPEGs are detected by Pillow as `MPO` with two frames; before commit `d2ea65f` (2026-10-03) they got 415. MPO is now accepted as JPEG, first frame only. Limitations: 16-bit-per-channel RGB PNGs are reduced to 8 bits (only 16-bit grayscale round-trips); Gemini's handling of 16-bit PNG is untested; peak memory for a 20 MP image was roughly +170–340 MiB on Windows and has not been measured on Render.
 
-### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14 and PR 5 merged 2026-10-12 as #16, both live-verified locally)
+### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14 and PR 5 merged 2026-10-12 as #16, both live-verified locally; PR 6 account deletion live-verified locally 2026-10-14)
 
-Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. Only the backend part is done; the app's login and logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), and answer questions and build quizzes from an experiment's stored analysis (PR 5). The app's login and experiment screens do not exist yet.
+Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. Only the backend part is done; the app's login and logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), answer questions and build quizzes from an experiment's stored analysis (PR 5), and delete the whole account (PR 6). The app's login and experiment screens do not exist yet.
 
 -   `POST /v1/experiments` (multipart `image`): validates and cleans the upload with `prepare_image`, analyzes it with Gemini, and stores it as a draft that expires after `DRAFT_TTL_HOURS`. Stored with it: a metadata-free JPEG display copy (long edge at most 2048 px), a 256 px thumbnail, the model that answered and a hash of the production prompt (`PROMPT_VERSION`). Returns 201 with the experiment and short-lived signed image URLs.
     -   Order: draft cap (409), `prepare_image`, display copies, the per-user daily quota (`consume_gemini_call`, 429 with `Retry-After`), Gemini, the stored-analysis cap, uploads, insert. A rejected image or a failed display copy costs no quota. An analysis over the `StoredAnalysis` caps gives 502 "Gemini returned an invalid or empty analysis" and stores nothing; the quota unit stays spent.
@@ -151,8 +151,24 @@ Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/ren
 -   Per-user daily quota: one unit per create, ask or quiz, `USER_DAILY_GEMINI_LIMIT` per UTC day (default 40), counted in `usage_daily` by `consume_gemini_call` on the database clock. When it is used up: 429 "Daily AI request limit reached for your account. Try again after 00:00 UTC." with `Retry-After` in seconds until 00:00 UTC. A non-boolean RPC result fails closed (429).
 -   `GET /v1/me` returns `usage` (`used_today`, `daily_limit`, `remaining`, `resets_at` = next 00:00 UTC), read from `usage_daily` with a 3 s timeout (`USAGE_TIMEOUT_SECONDS`). The timeout applies per connect, read and write step, not to the whole request, so a slow or trickling response can still hold `/v1/me` somewhat longer. Any failure or malformed row gives 200 with `usage: null` and a log line with op and status only. The backend clock picks the day while the quota RPC uses the database clock, so the two can disagree for a few seconds around midnight.
 -   Logs template experiment paths: `/v1/experiments/{id}`, `/v1/experiments/{id}/ask`, `/v1/experiments/{id}/quiz`. Any other path under the prefix logs as `/v1/experiments/{id}`. This covers app logs and, as a backstop, uvicorn's access log.
+-   `DELETE /v1/me` (PR 6) permanently deletes the caller's account.
+    -   Body: exactly `{"confirm": "DELETE MY ACCOUNT"}`. A missing body, any other phrase (including another letter case) or an extra field gives 422 before any Supabase request.
+    -   Responses: 204 when everything is gone. Otherwise 503 "Account deletion did not finish. Please try again."
+    -   Order:
+        1.  The user's `experiments` rows. Every returned row is re-checked as the user's own.
+        2.  A sweep of the whole storage folder `<user_id>/`, including orphans that no row lists. It uses the Storage list API page by page, checks every listed name before building a path, and is bounded by rounds and time.
+        3.  The Supabase Auth user, through the Admin API (hard delete). A 404 with `user_not_found` counts as already gone.
+        4.  A final sweep, for images that a create still running may have uploaded meanwhile.
+    -   `usage_daily` rows go by the `on delete cascade` with the Auth user. A deletion that fails earlier therefore keeps the day's quota count.
+    -   Retries: a failed step stops the rest, and every step is safe to repeat. The access token stays valid until it expires, so a retry finishes a half-deleted account.
+    -   App contract: on 503, keep the session and retry `DELETE /v1/me`; sign out only on 204.
+    -   Once the Auth user is gone, the foreign keys to `auth.users` reject any new row or quota use.
+    -   No migration is needed. The row delete is small and indexed, well inside the 5 s `statement_timeout`, and the Auth delete runs inside Supabase Auth, not as `service_role`.
+    -   Logs carry op names and counts only (`op=rows`, `op=objects`, `op=auth result=deleted|absent`, `op=final_sweep`).
 -   Isolation lives in `backend/app/services/logbook.py`: every query filters by the verified `user_id`, every storage path must start with `<user_id>/`, and rows returned by Supabase are re-checked. Logs carry operation names and status codes only.
--   Tests use an in-memory fake of Supabase (`backend/tests/test_experiments.py`). PR 5 (ask, quiz, caps, quota, `/v1/me` usage, log templates) is covered by mocked tests (backend suite 518 passed, 1 skipped, httptools not installed) and was also live-verified locally on 2026-10-12 (below).
+-   Tests use an in-memory fake of Supabase (`backend/tests/fake_supabase.py`, shared by `test_experiments.py` and `test_account_delete.py`). It covers Storage listing, Auth users, the cascade and the foreign-key rejections.
+    -   PR 5 (ask, quiz, caps, quota, `/v1/me` usage, log templates) is covered by mocked tests (backend suite 518 passed, 1 skipped, httptools not installed) and was also live-verified locally on 2026-10-12 (below).
+    -   PR 6 is covered by mocked tests (backend suite 615 passed, 1 skipped) and was live-verified locally on 2026-10-14 (below).
 
 Verified live (2026-10-11, user-reported, against the real Supabase project):
 
@@ -171,21 +187,42 @@ Verified live (2026-10-12, user-reported; backend run locally against the real S
 -   Orphans: 10 image pairs with no rows were found and removed in one user's folder, uploaded 2026-10-11 between 20:31 and 20:35 UTC. Most likely cause: creates run before migration 0002 was applied (`create_draft`/`discard_draft` returned 404, so cleanup kept the images by design). This confirms the "apply 0002 first" setup step and the need for a sweeper.
 -   Auth settings: sign-ups open, email confirmation on, custom SMTP off. Custom SMTP must be configured before real users sign up.
 
+Verified live (2026-10-14, user-reported; backend run locally against the real Supabase project, with a throwaway user C and a control user A):
+
+-   Setup:
+    -   C had 2 experiments (1 saved, 1 draft) and 3 quota units used.
+    -   C had 6 storage files, including a loose orphan image directly in C's folder and a nested orphan in a subfolder made in the dashboard.
+-   `DELETE /v1/me` with no body gave 422, with the phrase in the wrong case 422, and with the correct phrase 204.
+-   Logs: `rows experiments=2`, `objects deleted=6 rounds=2`, `auth result=deleted`, `final_sweep deleted=0`. Counts only, no IDs.
+-   A repeat delete gave 204 with `auth result=absent`: Supabase Auth reports `user_not_found`, so retries finish.
+-   The Auth Admin API accepts the secret key in the `apikey` header alone.
+-   Afterwards, checked by SQL:
+    -   C has 0 experiments, 0 usage rows, no Auth user and 0 files.
+    -   A's 2 files are untouched.
+    -   There are 2 users in total.
+-   C's still-valid access token: create gives 503 (log `consume_quota status=409`, no Gemini call), and C can no longer sign in (400).
+
 Still unverified:
 
 -   Latency between Render and Supabase.
 -   Memory on Render for the second decode (the display copies) on each create.
 -   The logbook on Render: `SUPABASE_URL` and `SUPABASE_SECRET_KEY` are not set there yet.
 -   The expired-draft purge and the 409 draft and saved caps were not exercised live.
+-   Account deletion from Render, and how long it takes there.
 
 Known trade-offs / deferred:
 
--   Orphaned storage objects persist until a sweeper exists: a crash between upload and insert, a failed image delete, or an expired-draft purge whose delete was still running when its re-check read. PR 6 account deletion must delete everything under the user's folder, not only the files listed in rows.
+-   Orphaned storage objects persist until a sweeper exists: a crash between upload and insert, a failed image delete, or an expired-draft purge whose delete was still running when its re-check read. Account deletion (PR 6) removes everything under the user's folder, orphans included, but only when the account itself is deleted.
 -   A Gemini failure, or hitting the server-wide daily cap, still costs one unit of the user's daily quota (create, ask and quiz).
 -   The unit is also spent when the Gemini API key is not configured: the 503 comes after the charge, as in create. This is an operator setup error, not something a user can trigger.
 -   The per-user quota (default 40) is larger than the share of the server-wide `GEMINI_DAILY_CALL_LIMIT` (default 100, per process) that a few heavy users need to exhaust it for everyone. Revisit both limits before opening sign-ups.
 -   The draft and saved caps rely on PostgREST's default READ COMMITTED isolation (each count runs after the per-user advisory lock). Under REPEATABLE READ or stricter, the snapshot predates the lock and a concurrent create could be missed. Keep the default, or switch to per-user counter rows locked with SELECT ... FOR UPDATE.
--   Migration 0002 sets a 5 s `statement_timeout` on `service_role`, which covers every backend statement. PR 6 account deletion (cascade plus storage cleanup) and any backfill must set a longer timeout for their own transaction.
+-   Migration 0002 sets a 5 s `statement_timeout` on `service_role`, which covers every backend statement. Account deletion (PR 6) does not need a longer one: its row delete is small and indexed, and the Auth delete runs inside Supabase Auth, not as `service_role`. A future backfill must set a longer timeout for its own transaction.
+-   After account deletion, an access token stays valid until it expires, because the backend verifies it locally. With it, the list is empty, reads give 404, create gives 503 at the quota step, and `GET /v1/me` gives 200 with usage 0. No data can come back: the foreign keys to `auth.users` reject new rows and quota use.
+-   A create waiting on Gemini while an account is deleted can upload its images afterwards. Its insert then fails, and its cleanup normally removes the images. If that cleanup fails, the images are orphans for the planned sweeper; the app has already signed out, so nothing retries.
+-   Any valid access token can delete the account; the confirmation phrase only prevents accidents. A recent-sign-in requirement is deferred until the app has a re-auth flow.
+-   "Permanent" deletion means live data. Supabase backups, Supabase API logs and Render request logs keep traces until they age out.
+-   `DELETE /v1/me` has no `Retry-After` on its 503 and no per-user rate limit.
 -   No per-user rate limit on `/v1` list, PATCH and DELETE, and every list (and create) also starts an expired-draft purge (2-4 Supabase calls). Add per-user limits, and run the purge at most once per user per few minutes.
 -   On an insert failure, cleanup waits until 2 s past the create deadline (up to about 10 s) before `discard_draft`, and holds a threadpool worker meanwhile. The client already gets a 503; the worker cost matters only if insert failures become frequent.
 -   Clock skew: the create deadline tolerates the database clock lagging Render's by about 2 s (minus the discard call's latency). Beyond that, a queued create can still insert after its images were deleted (a draft without images until the purge). Future hardening: a tombstone written by `discard_draft` and checked by `create_draft`, which removes the clock dependence. The purge margin assumes the clocks agree within 5 minutes.
@@ -197,7 +234,7 @@ Known trade-offs / deferred:
 Schema and settings:
 
 -   `supabase/migrations/0001_logbook.sql` creates `experiments`, `usage_daily`, the `consume_gemini_call` function and a private `experiment-images` bucket. Row-level security is on, with no policies, so the app's publishable key cannot touch them. Only the backend (secret key) can.
--   `supabase/migrations/0002_logbook_caps.sql` (PR 4) adds `create_draft`, `discard_draft` and `update_experiment` (draft and saved caps under a per-user lock) and a 5 s `statement_timeout` on `service_role`. PR 5 needs no migration.
+-   `supabase/migrations/0002_logbook_caps.sql` (PR 4) adds `create_draft`, `discard_draft` and `update_experiment` (draft and saved caps under a per-user lock) and a 5 s `statement_timeout` on `service_role`. PR 5 and PR 6 need no migration.
 -   Settings: `SUPABASE_URL` (https origin), `SUPABASE_SECRET_KEY` (backend host only, never the app or the repo), `LOGBOOK_BUCKET`, `USER_DAILY_GEMINI_LIMIT` (default 40, shared by create, ask and quiz), `MAX_SAVED_EXPERIMENTS_PER_USER`, `MAX_DRAFTS_PER_USER`, `DRAFT_TTL_HOURS`. The logbook counts as configured only when both the URL and the secret key are set.
 
 Setup (manual; steps 1-2 done on the real project, step 3 partly done (SMTP still off), step 4 done locally but not on Render):
