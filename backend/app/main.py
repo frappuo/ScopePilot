@@ -5,7 +5,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.middleware import AppTokenMiddleware, BearerAuthMiddleware, BodySizeLimitMiddleware, log_path
+from app.middleware import (AppTokenMiddleware, BearerAuthMiddleware, BodySizeLimitMiddleware,
+                            LegacyApiMiddleware, log_path)
 from app.routes import analyze, ask, experiments, health, me, quiz
 from app.services.errors import AnalysisError
 
@@ -56,10 +57,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ScopePilot", version="0.1.0", lifespan=lifespan)
 app.add_middleware(BodySizeLimitMiddleware)
-# Last added runs first, so the order is AppToken -> Bearer (/v1/* only) ->
-# BodySize: unauthorized requests are rejected before any body is read.
+# Last added runs first, so the order is Legacy (410 while disabled) -> AppToken ->
+# Bearer (/v1/* only) -> BodySize: rejected requests are answered before any body is read.
 app.add_middleware(BearerAuthMiddleware)
 app.add_middleware(AppTokenMiddleware)
+app.add_middleware(LegacyApiMiddleware)
 app.include_router(health.router)
 app.include_router(analyze.router)
 app.include_router(ask.router)

@@ -74,6 +74,32 @@ def test_invalid_supabase_url_is_rejected(url):
         config.Settings(_env_file=None, supabase_url=url)
 
 
+@pytest.mark.parametrize("value, expected", [
+    ("false", False), ("0", False), ("no", False), ("off", False),
+    ("true", True), ("1", True),
+])
+def test_legacy_api_enabled_parsed_from_environment(monkeypatch, value, expected):
+    monkeypatch.setenv("LEGACY_API_ENABLED", value)
+    assert config.Settings(_env_file=None).legacy_api_enabled is expected
+
+
+def test_invalid_legacy_api_enabled_is_rejected(monkeypatch):
+    monkeypatch.setenv("LEGACY_API_ENABLED", "maybe")
+    with pytest.raises(ValueError):
+        config.Settings(_env_file=None)
+
+
+def test_invalid_legacy_api_enabled_stops_startup_with_sanitized_error(monkeypatch):
+    # Synthetic test input, never a real credential; no .env file is read.
+    monkeypatch.setenv("GEMINI_API_KEY", "configuration-test-only")
+    monkeypatch.setenv("LEGACY_API_ENABLED", "maybe")
+    settings_class = config.Settings
+    with patch.object(config, "Settings", lambda: settings_class(_env_file=None)):
+        with pytest.raises(RuntimeError, match="Invalid backend environment configuration") as error:
+            config.get_settings()
+    assert "maybe" not in str(error.value)
+
+
 @pytest.mark.parametrize("field, value", [
     ("user_daily_gemini_limit", 0),
     ("max_saved_experiments_per_user", 0),

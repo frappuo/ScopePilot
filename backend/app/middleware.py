@@ -1,4 +1,5 @@
-"""Reject unauthorized clients and oversized request bodies before FastAPI reads or parses them."""
+"""Reject disabled legacy routes, unauthorized clients and oversized request bodies before
+FastAPI reads or parses them."""
 
 import hmac
 import json
@@ -27,6 +28,8 @@ EXPERIMENT_ACTIONS = frozenset({"ask", "quiz"})
 TOKEN_HEADER = b"x-scopepilot-token"
 MAX_BEARER_TOKEN_BYTES = 8 * 1024
 INVALID_SESSION = {"detail": "Session expired or invalid."}
+LEGACY_PATHS = frozenset({"/analyze", "/ask", "/quiz"})
+LEGACY_GONE = {"detail": "This version of ScopePilot is no longer supported. Please update the app."}
 
 
 def body_limit(path: str, settings: Settings) -> int:
@@ -94,6 +97,27 @@ async def _send_json(send: Send, status: int, payload: dict[str, str],
 async def _send_413(send: Send, scope: Scope, limit: int, reason: str) -> None:
     logger.warning("Request body rejected path=%s limit=%s reason=%s", _log_path(scope), limit, reason)
     await _send_json(send, 413, {"detail": f"Request body exceeds the {limit:,}-byte limit."})
+
+
+class LegacyApiMiddleware:
+    """410 for /analyze, /ask and /quiz while LEGACY_API_ENABLED is false; any method.
+
+    Runs first, before the app token check and before the body is read, so a
+    disabled route costs nothing and answers every caller the same way.
+    """
+
+    def __init__(self, app: Callable[[Scope, Receive, Send], Awaitable[None]],
+                 settings_for: Callable[[Scope], Settings] = _settings_for) -> None:
+        self.app = app
+        self.settings_for = settings_for
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["path"] not in LEGACY_PATHS \
+                or self.settings_for(scope).legacy_api_enabled:
+            await self.app(scope, receive, send)
+            return
+        logger.info("Request rejected rule=legacy_disabled path=%s", _log_path(scope))
+        await _send_json(send, 410, LEGACY_GONE)
 
 
 class AppTokenMiddleware:

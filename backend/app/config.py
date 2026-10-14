@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     # Shared app token (X-ScopePilot-Token). Empty disables the check. It ships
     # inside the app bundle, so it deters casual clients; it is not authentication.
     app_token: SecretStr = SecretStr("")
+    # Legacy /analyze, /ask and /quiz. False answers them with 410 before any body is read.
+    legacy_api_enabled: bool = True
     # Comma-separated; a str because pydantic-settings would JSON-decode a list.
     # Tried in order after gemini_model, only on quota (429) or missing model (404).
     gemini_fallback_models: str = ""
