@@ -3,6 +3,26 @@
 Dated log, newest first. Current status, planned features, and known issues
 live in `docs/HANDOFF.md`.
 
+## Logbook PR 7 legacy switch (2026-10-15)
+
+- `LEGACY_API_ENABLED` (default `true`). When `false`, `LegacyApiMiddleware`
+  answers `/analyze`, `/ask` and `/quiz` (any method) with 410 "This version
+  of ScopePilot is no longer supported. Please update the app." before the app
+  token check or any body read. `/health` and `/v1` are unaffected. An invalid
+  value stops startup.
+- Middleware order: Legacy -> AppToken -> Bearer -> BodySize. Never start the
+  backend with `--root-path`; the middlewares match the raw request path.
+- Rejections log `Request rejected rule=legacy_disabled path=...` at INFO.
+- The app now maps 410 to the "Please update the app." message.
+- Backend suite: 658 passed, 1 skipped. Frontend tests: 42 passed. All mocked;
+  not verified on Render.
+- Rollout and rollback in `docs/HANDOFF.md` ("Legacy switch").
+- Next:
+  - the app's login and logbook screens;
+  - custom SMTP in Supabase;
+  - `SUPABASE_URL` and `SUPABASE_SECRET_KEY` on Render;
+  - then set `LEGACY_API_ENABLED=false` on Render.
+
 ## Logbook PR 6 account deletion (2026-10-14)
 
 - `DELETE /v1/me` with the body `{"confirm": "DELETE MY ACCOUNT"}` gives 204,

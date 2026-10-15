@@ -6,13 +6,13 @@ AI-assisted microscopy education. AI observations are tentative, require student
 
 Implemented:
 
-- FastAPI backend: `GET /health`, `POST /analyze` (image → structured analysis), `POST /ask` (follow-up question about the current analysis), `POST /quiz` (three multiple-choice questions from the current analysis).
+- FastAPI backend: `GET /health`, `POST /analyze` (image → structured analysis), `POST /ask` (follow-up question about the current analysis), `POST /quiz` (three multiple-choice questions from the current analysis). The three legacy routes return 410 when `LEGACY_API_ENABLED=false` (see Request limits).
 - Expo TypeScript app: gallery image selection, analysis display, follow-up Q&A, and quiz.
 - Braintrust prompt-evaluation harness (`backend/evals/microscopy_eval.py`).
 
 The backend also has a student logbook API under `/v1` (sign-in with a Supabase access token, saved experiments, and follow-up questions and quizzes on a saved experiment), but the app has no accounts or logbook screens yet.
 
-Not implemented: RAG, camera capture in the app, and per-user rate limiting on the legacy routes. Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
+Not implemented: RAG, camera capture in the app, the app's login and logbook screens, and per-user rate limiting on the legacy routes (they can be switched off instead). Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
 
 ## Backend
 
@@ -28,7 +28,7 @@ Copy-Item backend/.env.example backend/.env
 
 Create the environment file only once; do not overwrite an existing configuration. Edit `backend/.env` and set `GEMINI_API_KEY` to your key. Environment variables override this file. Restart the backend after changes.
 
-`GEMINI_MODEL` selects the model; it must support image input and structured JSON output, and your key must have access to it. The default in `backend/app/config.py` is `gemini-2.5-flash`, which an earlier live check (see `progress.md`) found unavailable to new users. `backend/.env.example` sets `gemini-3.1-flash-lite`. Other settings: `GEMINI_FALLBACK_MODELS` (empty; up to 3 models tried only on quota or model-not-found errors, see `docs/HANDOFF.md`), `GEMINI_TIMEOUT_SECONDS` (default 60), `MAX_IMAGE_BYTES` (10 MiB), `MAX_IMAGE_PIXELS` (20,000,000), `MAX_ENCODED_IMAGE_BYTES` (14 MiB; not listed in `.env.example`), `MAX_JSON_BODY_BYTES` (64 KiB), `GEMINI_DAILY_CALL_LIMIT` (100), `APP_TOKEN` (empty = check off; see App token). Numeric settings must be positive.
+`GEMINI_MODEL` selects the model; it must support image input and structured JSON output, and your key must have access to it. The default in `backend/app/config.py` is `gemini-2.5-flash`, which an earlier live check (see `progress.md`) found unavailable to new users. `backend/.env.example` sets `gemini-3.1-flash-lite`. Other settings: `GEMINI_FALLBACK_MODELS` (empty; up to 3 models tried only on quota or model-not-found errors, see `docs/HANDOFF.md`), `GEMINI_TIMEOUT_SECONDS` (default 60), `MAX_IMAGE_BYTES` (10 MiB), `MAX_IMAGE_PIXELS` (20,000,000), `MAX_ENCODED_IMAGE_BYTES` (14 MiB; not listed in `.env.example`), `MAX_JSON_BODY_BYTES` (64 KiB), `GEMINI_DAILY_CALL_LIMIT` (100), `APP_TOKEN` (empty = check off; see App token), `LEGACY_API_ENABLED` (`true`; see Request limits). Numeric settings must be positive.
 
 `.env` files are ignored by Git; only `.env.example` belongs in version control. Never put API keys in source files or the frontend.
 
@@ -71,6 +71,7 @@ Errors use `{"detail":"..."}` (FastAPI validation errors use a detail list):
 |---|---|
 | 400 | Empty, corrupt, or undecodable image |
 | 401 | Missing or wrong `X-ScopePilot-Token` while `APP_TOKEN` is set |
+| 410 | Legacy `/analyze`, `/ask` or `/quiz` while `LEGACY_API_ENABLED=false` |
 | 413 | Request body over limit, upload over size limit, resolution over pixel limit, or re-encoded image too large |
 | 415 | Unsupported declared type, content not matching the declared type, or multi-frame image |
 | 422 | Missing upload, invalid request body, or `/ask`/`/quiz` analysis over the input caps |
@@ -82,6 +83,8 @@ No automatic provider retries are made.
 
 ### Request limits
 
+- **Middleware order** (`backend/app/main.py`): Legacy -> AppToken -> Bearer -> BodySize. Each check answers from the path and headers before the body is read. Do not start the backend with `--root-path`: the middlewares match the raw request path.
+- **Legacy switch** (`LEGACY_API_ENABLED`, default `true`): when `false`, `/analyze`, `/ask` and `/quiz` (any method) get 410 `{"detail": "This version of ScopePilot is no longer supported. Please update the app."}` before the app token check or any body read; `/health` and `/v1` are unaffected. Any value other than true/false/1/0/yes/no/on/off stops startup. Flip it on Render only after an app build that uses `/v1` has shipped; rollout and rollback in `docs/HANDOFF.md`.
 - **Body size** (`backend/app/middleware.py`): `/analyze` and `POST /v1/experiments` allow `MAX_IMAGE_BYTES` + 64 KiB of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES`; `/health` is exempt. A `Content-Length` over the limit gets 413 before anything is read; a chunked body is counted as it streams and gets 413 once it passes the limit.
 - **Input caps** for the analysis sent to `/ask` and `/quiz`: `probable_specimen` ≤ 300 characters, `explanation` ≤ 6000, each list ≤ 40 items of ≤ 1000 characters; over a cap gives 422. The `/analyze` response is not capped.
 - **Daily Gemini cap**: at most `GEMINI_DAILY_CALL_LIMIT` Gemini attempts per UTC day, fallback attempts included; then 503 with `Retry-After` (seconds until 00:00 UTC). The count is per process and resets on restart; Google's own quota reset time may differ from UTC midnight. Requests rejected before Gemini (bad images, caps, body size) do not count.
@@ -114,7 +117,7 @@ The app uploads the original picked file without converting, resizing, or croppi
 
 For 400, 413, and 415 responses, the app appends the backend's short `detail` message to its own error text. Details from 5xx responses and 422 are intentionally never shown; those use fixed messages written in the app:
 
-- 401: "This app version can't reach the service. Please update the app."
+- 401 and 410: "This app version can't reach the service. Please update the app."
 - 429: "Too many requests right now. Please wait a minute and try again."
 - 503 from the daily Gemini cap: a fixed "Today's ScopePilot analysis limit has been reached…" message. The app recognizes the backend detail by its prefix but never displays it; any other 503 gets the generic message.
 - `/ask` and `/quiz` 413, and `/quiz` 422, have their own messages. For an `/ask` 422 the app reads only the structured error locations: a too-long question gets "Please enter a question of up to 500 characters."; anything else (such as the analysis caps) gets "This request could not be processed. Please analyze the image again."

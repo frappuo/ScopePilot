@@ -24,6 +24,7 @@ The AI is assistive and tentative; the student remains responsible for verifying
 -   FastAPI backend with Gemini; upload validation and re-encoding (section 5); structured, Pydantic-validated responses; the app shows the backend's `detail` for 400/413/415 only.
 -   Optional Gemini model fallback on quota or model-not-found (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model.
 -   Request limits (body size, `/ask`/`/quiz` input caps, global daily Gemini cap) and an optional shared app token (`APP_TOKEN`; a deterrent, not authentication).
+-   Legacy switch (logbook PR 7): `LEGACY_API_ENABLED=false` answers `/analyze`, `/ask` and `/quiz` with 410 before any body is read (section 5). Default `true`; not yet flipped on Render.
 -   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete, experiment-scoped follow-up questions and quiz, daily usage in `GET /v1/me`, account deletion with `DELETE /v1/me`; section 5). No login or logbook screens in the app yet.
 -   Braintrust prompt-evaluation harness with four variants and deterministic scorers.
 
@@ -49,10 +50,9 @@ Do not describe planned features as implemented.
 
 ### Planned / not implemented
 
-None of the following exists in the code. Remaining logbook PRs, in order:
+None of the following exists in the code. The logbook backend PRs (1-7) are done; remaining, in order:
 
--   PR 7: legacy switch.
--   Then the frontend login and experiments screens (no login in the app today).
+-   The app's login and logbook (experiments) screens (no login in the app today).
 -   Later assistant features: cross-experiment context, learning tracking.
 -   RAG over trusted biology material.
 
@@ -62,7 +62,8 @@ Also not implemented: per-user rate limiting on the legacy `/analyze`, `/ask` an
 
 -   CORS is intentionally off, so the browser preview cannot call the backend.
 -   No authentication or per-user rate limiting on the legacy API (body limits, input caps, a global daily cap, and an optional shared app token exist).
--   The legacy `/ask` and `/quiz` trust the client-supplied analysis until PR 7 (legacy switch). The `/v1/experiments/{id}/ask` and `/quiz` routes read the stored analysis instead.
+-   The legacy `/ask` and `/quiz` trust the client-supplied analysis. The `/v1/experiments/{id}/ask` and `/quiz` routes read the stored analysis instead.
+-   The two legacy items above stay open until `LEGACY_API_ENABLED=false` is set on Render (rollout in section 5, "Legacy switch"). The switch exists, but the app still uses the legacy routes.
 -   Reconcile eval variant names (section 8).
 -   Gemini's handling of 16-bit grayscale PNG is untested.
 -   The code default `GEMINI_MODEL` (`gemini-2.5-flash`) differs from `backend/.env.example` (`gemini-3.1-flash-lite`) and was recorded as unavailable to new users (`progress.md`).
@@ -89,16 +90,16 @@ Planned RAG: trusted material → chunks → embeddings → vector retrieval →
 
 ## 5. Backend
 
-Layout: `routes/` = HTTP only, `schemas/` = Pydantic, `services/` = Gemini and business logic (`gemini.py`, `images.py`, `logbook.py`, `auth.py`), `config.py` = env, `middleware.py` = app token, bearer auth, body limits and log-path templates.
+Layout: `routes/` = HTTP only, `schemas/` = Pydantic, `services/` = Gemini and business logic (`gemini.py`, `images.py`, `logbook.py`, `auth.py`), `config.py` = env, `middleware.py` = legacy switch, app token, bearer auth, body limits and log-path templates.
 
 ### Endpoints
 
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/health` | GET | Health check. |
-| `/analyze` | POST | Validate an image, call Gemini, return structured analysis. |
-| `/ask` | POST | Answer a follow-up using the analysis context. |
-| `/quiz` | POST | Generate quiz questions from the analysis context. |
+| `/analyze` | POST | Validate an image, call Gemini, return structured analysis. 410 when `LEGACY_API_ENABLED=false`. |
+| `/ask` | POST | Answer a follow-up using the analysis context. 410 when `LEGACY_API_ENABLED=false`. |
+| `/quiz` | POST | Generate quiz questions from the analysis context. 410 when `LEGACY_API_ENABLED=false`. |
 | `/v1/me` | GET | The signed-in user (Supabase token) and today's per-user Gemini usage (`usage`, or null if it could not be read). |
 | `/v1/me` | DELETE | Permanently delete the signed-in account and all its logbook data (body `{"confirm": "DELETE MY ACCOUNT"}`). |
 | `/v1/experiments` | POST, GET | Create a draft from an image; list own saved experiments and live drafts. |
@@ -117,8 +118,29 @@ The `/v1` routes are the student logbook ("Student logbook" below); they need a 
 Details in README.md. Not covered there:
 
 -   The daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`, default 100, counted just before each `generate_content` call, so fallbacks count) lives in process memory: it resets on restart and each worker process counts separately. Google's own quota reset time may differ from UTC midnight. Covered by mocked tests (`test_limits.py`); not verified on Render.
--   `APP_TOKEN` (`AppTokenMiddleware`, outermost, `hmac.compare_digest`) is compiled into the app bundle via `EXPO_PUBLIC_APP_TOKEN`: a deterrent, **not authentication**. Rollout: ship the app, then set `APP_TOKEN` on Render, then confirm old builds get the 401 "update the app" message. Rejections log path and reason only. Not verified on Render or in a device build.
+-   Middleware order: Legacy -> AppToken -> Bearer -> BodySize (`app/main.py`). Never start the backend with `--root-path`: the middlewares match the raw request path, so a prefix would make them miss.
+-   `APP_TOKEN` (`AppTokenMiddleware`, right after the legacy switch, `hmac.compare_digest`) is compiled into the app bundle via `EXPO_PUBLIC_APP_TOKEN`: a deterrent, **not authentication**. Rollout: ship the app, then set `APP_TOKEN` on Render, then confirm old builds get the 401 "update the app" message. Rejections log path and reason only. Not verified on Render or in a device build.
 -   CORS is intentionally off: the native app does not need it, and CORS is not an abuse control.
+
+### Legacy switch (`LEGACY_API_ENABLED`, logbook PR 7, 2026-10-15)
+
+-   Env variable `LEGACY_API_ENABLED`, default `true` (today's behaviour). Accepts `true/false/1/0/yes/no/on/off`; any other value stops startup with the sanitised configuration error.
+-   When `false`, `LegacyApiMiddleware` (first in the chain) answers `/analyze`, `/ask` and `/quiz` (exact paths, any method) with 410 `{"detail": "This version of ScopePilot is no longer supported. Please update the app."}` and `connection: close`, before the app token check, the body limit or any body read. `/health` and `/v1/*` are unaffected. Each rejection logs one INFO line, `Request rejected rule=legacy_disabled path=...`, with no headers or body.
+-   One switch for all three routes: the app analyzes and then asks/quizzes on the same screen, so a partial switch would leave a half-working app. The routers stay registered, so `/docs` still lists them; removing the legacy code is a later cleanup.
+-   With the switch off, `/v1` gets the whole server-wide `GEMINI_DAILY_CALL_LIMIT` (one counter per process).
+-   The app maps 410 to "This app version can't reach the service. Please update the app." Builds made before that change show "Analysis failed (HTTP 410). Please try again." (and the same for Question/Quiz).
+-   Covered by mocked tests (`test_legacy_switch.py`, `test_config.py`); not verified on Render.
+
+Rollout (each step verified before the next):
+
+1.  Deploy with the variable unset on Render. Verify: `/health` gives 200, and the current app on a phone can still analyze, ask and quiz against Render. Locally, run once with `LEGACY_API_ENABLED=false` and check with curl that each legacy path gives 410 with the detail and `/health` gives 200.
+2.  Prerequisites for `/v1` on Render: set `SUPABASE_URL` and `SUPABASE_SECRET_KEY` there (still unset, so `/v1` gives 503 on Render today), and configure custom SMTP in Supabase before real users sign up. Verify: `GET /v1/me` without a token gives 401, not 503.
+3.  Ship the app build that uses only `/v1` (the planned login and logbook screens). Verify on a physical device against Render: sign in, create, ask, quiz, list, delete. In the logs, in-app actions show only `/v1` lines; legacy lines come only from old builds.
+4.  Wait until the old builds you care about are updated; the legacy access-log lines show when callers have dropped off.
+5.  Set `LEGACY_API_ENABLED=false` on Render (an env change restarts the service). Verify: curl POST `/analyze`, `/ask` and `/quiz` each give 410 with the detail; `/health` gives 200; the new build still works end to end; an old build shows the update message (or the HTTP 410 fallback on builds made before the 410 mapping); the app log shows `rule=legacy_disabled` lines.
+6.  Rollback: set the variable back to `true` (or remove it) on Render. No migration and no data are involved.
+
+`APP_TOKEN` is independent of this switch; its 401 already tells old builds to update.
 
 ### Model fallback (`GEMINI_FALLBACK_MODELS`)
 
@@ -136,7 +158,7 @@ Details in README.md. Not covered there:
 
 Steps are in README.md. iPhone camera JPEGs are detected by Pillow as `MPO` with two frames; before commit `d2ea65f` (2026-10-03) they got 415. MPO is now accepted as JPEG, first frame only. Limitations: 16-bit-per-channel RGB PNGs are reduced to 8 bits (only 16-bit grayscale round-trips); Gemini's handling of 16-bit PNG is untested; peak memory for a 20 MP image was roughly +170–340 MiB on Windows and has not been measured on Render.
 
-### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14 and PR 5 merged 2026-10-12 as #16, both live-verified locally; PR 6 account deletion live-verified locally 2026-10-14)
+### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14 and PR 5 merged 2026-10-12 as #16, both live-verified locally; PR 6 account deletion live-verified locally 2026-10-14; PR 7 legacy switch done 2026-10-15, see "Legacy switch" above)
 
 Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. Only the backend part is done; the app's login and logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), answer questions and build quizzes from an experiment's stored analysis (PR 5), and delete the whole account (PR 6). The app's login and experiment screens do not exist yet.
 
