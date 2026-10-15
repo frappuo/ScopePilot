@@ -323,6 +323,7 @@ function respondWith(status, body) {
 
 for (const [status, message] of [
   [401, "This app version can't reach the service. Please update the app."],
+  [410, "This app version can't reach the service. Please update the app."],
   [429, 'Too many requests right now. Please wait a minute and try again.'],
 ]) {
   test(`${status} has a fixed message on every call`, async () => {

@@ -74,7 +74,7 @@ async function isDailyLimit(response: Response): Promise<boolean> {
 // Backend detail text is shown only for 400/413/415; other bodies never reach the UI.
 async function errorMessage(response: Response, messages: Record<number, string>, fallback: string): Promise<string> {
   if (await isDailyLimit(response)) return DAILY_LIMIT;
-  const message = ({ 401: UNAUTHORIZED, 429: TOO_MANY_REQUESTS, ...messages } as Record<number, string>)[response.status] ?? fallback;
+  const message = ({ 401: UNAUTHORIZED, 410: UNAUTHORIZED, 429: TOO_MANY_REQUESTS, ...messages } as Record<number, string>)[response.status] ?? fallback;
   const detail = [400, 413, 415].includes(response.status) ? await validationDetail(response) : undefined;
   return detail ? `${message} Details: ${detail}` : message;
 }
