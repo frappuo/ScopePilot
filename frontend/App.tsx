@@ -4,17 +4,20 @@ import { AuthProvider } from './src/auth/AuthProvider';
 import { readSupabaseConfig } from './src/config/env';
 import RootNavigator from './src/navigation/RootNavigator';
 import ConfigErrorScreen from './src/screens/ConfigErrorScreen';
+import { ThemeProvider } from './src/theme/ThemeProvider';
 
 // Read once: the values are inlined at build time.
 const supabaseConfig = readSupabaseConfig();
 
 export default function App() {
   return (
-    <SafeAreaProvider>
-      <StatusBar style="dark" />
-      {supabaseConfig.ok
-        ? <AuthProvider config={supabaseConfig.config}><RootNavigator /></AuthProvider>
-        : <ConfigErrorScreen problem={supabaseConfig.problem} />}
-    </SafeAreaProvider>
+    <ThemeProvider>
+      <SafeAreaProvider>
+        <StatusBar style="dark" />
+        {supabaseConfig.ok
+          ? <AuthProvider config={supabaseConfig.config}><RootNavigator /></AuthProvider>
+          : <ConfigErrorScreen problem={supabaseConfig.problem} />}
+      </SafeAreaProvider>
+    </ThemeProvider>
   );
 }
