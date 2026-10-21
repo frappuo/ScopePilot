@@ -1,79 +1,158 @@
 import type { ReactNode } from 'react';
-import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type StyleProp, type TextInputProps, type TextProps, type ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '../theme/ThemeProvider';
+import type { Theme, TypeVariant } from '../theme/tokens';
 
-// Shared building blocks for the auth and account screens, in the existing app palette.
+// Shared building blocks for the auth and account screens. Every colour and size comes from the theme.
+
+type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive';
+type NoticeKind = 'error' | 'info' | 'success' | 'warning';
+type TextTone = 'default' | 'muted' | 'accent' | 'danger';
+
+function typeStyle(theme: Theme, variant: TypeVariant) {
+  const { maxFontSizeMultiplier: _cap, ...style } = theme.type[variant];
+  return style;
+}
+
+export function makeUiStyles(theme: Theme) {
+  const { colors, spacing, radius, layout } = theme;
+  return StyleSheet.create({
+    safe: { flex: 1, backgroundColor: colors.canvas },
+    flex: { flex: 1 },
+    center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.canvas },
+    page: { padding: spacing.xl, gap: spacing.lg, width: '100%', maxWidth: layout.maxWidth, alignSelf: 'center', paddingBottom: spacing.xxl + spacing.sm },
+    card: { backgroundColor: colors.surface, borderRadius: radius.card, padding: spacing.lg, gap: spacing.sm, ...theme.elevation },
+    cardMuted: { backgroundColor: colors.surfaceMuted, borderRadius: radius.card, padding: spacing.lg, gap: spacing.sm },
+    display: typeStyle(theme, 'display'),
+    title: { ...typeStyle(theme, 'title'), marginTop: spacing.sm },
+    headline: typeStyle(theme, 'headline'),
+    body: typeStyle(theme, 'body'),
+    label: typeStyle(theme, 'label'),
+    caption: typeStyle(theme, 'caption'),
+    toneDefault: { color: colors.text },
+    toneMuted: { color: colors.textMuted },
+    toneAccent: { color: colors.accent },
+    toneDanger: { color: colors.danger },
+    field: { gap: spacing.xs + spacing.xxs },
+    input: {
+      ...typeStyle(theme, 'body'), backgroundColor: colors.surface, borderColor: colors.borderStrong, borderRadius: radius.control,
+      borderWidth: 1, color: colors.text, minHeight: 48, paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
+    },
+    button: { borderRadius: radius.control, paddingHorizontal: spacing.lg, paddingVertical: spacing.lg, alignItems: 'center', justifyContent: 'center', minHeight: 52 },
+    primary: { backgroundColor: colors.accent },
+    secondary: { borderWidth: 1, borderColor: colors.borderStrong },
+    ghost: {},
+    destructive: { backgroundColor: colors.danger },
+    buttonText: { ...typeStyle(theme, 'body'), fontWeight: '600' },
+    onFilled: { color: colors.onAccent },
+    onPlain: { color: colors.accent },
+    dim: { opacity: 0.5 },
+    link: { minHeight: layout.minTouch, justifyContent: 'center', alignSelf: 'flex-start' },
+    linkText: { ...typeStyle(theme, 'body'), fontWeight: '600', color: colors.info, textDecorationLine: 'underline' },
+    notice: { padding: spacing.lg, borderRadius: radius.control },
+    error: { backgroundColor: colors.dangerSoft }, errorText: { color: colors.danger },
+    info: { backgroundColor: colors.infoSoft }, infoText: { color: colors.text },
+    success: { backgroundColor: colors.successSoft }, successText: { color: colors.success },
+    warning: { backgroundColor: colors.warningSoft }, warningText: { color: colors.warning },
+  });
+}
+
+type UiStyles = ReturnType<typeof makeUiStyles>;
+
+// One style sheet per theme object; the provider keeps the theme stable while the scheme is unchanged.
+const stylesByTheme = new WeakMap<Theme, UiStyles>();
+
+function useUiStyles(): [UiStyles, Theme] {
+  const theme = useTheme();
+  let styles = stylesByTheme.get(theme);
+  if (!styles) { styles = makeUiStyles(theme); stylesByTheme.set(theme, styles); }
+  return [styles, theme];
+}
+
+const TONES: Record<TextTone, 'toneDefault' | 'toneMuted' | 'toneAccent' | 'toneDanger'> = {
+  default: 'toneDefault', muted: 'toneMuted', accent: 'toneAccent', danger: 'toneDanger',
+};
+
+const NOTICE_TEXT: Record<NoticeKind, 'errorText' | 'infoText' | 'successText' | 'warningText'> = {
+  error: 'errorText', info: 'infoText', success: 'successText', warning: 'warningText',
+};
 
 export function Screen({ children, edges = ['bottom', 'left', 'right'] }: { children: ReactNode; edges?: ('top' | 'bottom' | 'left' | 'right')[] }) {
+  const [styles, theme] = useUiStyles();
   return <SafeAreaView edges={edges} style={styles.safe}>
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.flex}>
-      <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled"
+        indicatorStyle={theme.scheme === 'dark' ? 'white' : 'default'}>
         {children}
       </ScrollView>
     </KeyboardAvoidingView>
   </SafeAreaView>;
 }
 
+export function Card({ children, tone = 'surface', style }: { children: ReactNode; tone?: 'surface' | 'muted'; style?: StyleProp<ViewStyle> }) {
+  const [styles] = useUiStyles();
+  return <View style={[tone === 'surface' ? styles.card : styles.cardMuted, style]}>{children}</View>;
+}
+
+export function AppText({ variant = 'body', tone, style, ...props }: TextProps & { variant?: TypeVariant; tone?: TextTone }) {
+  const [styles, theme] = useUiStyles();
+  const color = tone ?? (variant === 'label' || variant === 'caption' ? 'muted' : 'default');
+  return <Text maxFontSizeMultiplier={theme.type[variant].maxFontSizeMultiplier} {...props}
+    style={[styles[variant], styles[TONES[color]], style]} />;
+}
+
 export function Title({ children }: { children: ReactNode }) {
-  return <Text accessibilityRole="header" style={styles.title}>{children}</Text>;
+  return <AppText accessibilityRole="header" variant="title">{children}</AppText>;
 }
 
 export function Body({ children }: { children: ReactNode }) {
-  return <Text style={styles.body}>{children}</Text>;
+  return <AppText variant="body">{children}</AppText>;
 }
 
 export function Field({ label, ...input }: TextInputProps & { label: string }) {
+  const [styles, theme] = useUiStyles();
   return <View style={styles.field}>
-    <Text style={styles.label}>{label}</Text>
-    <TextInput accessibilityLabel={label} placeholderTextColor="#7b8d86" style={styles.input} {...input} />
+    <AppText variant="label" tone="default">{label}</AppText>
+    <TextInput accessibilityLabel={label} placeholderTextColor={theme.colors.textMuted}
+      selectionColor={theme.colors.accent} cursorColor={theme.colors.accent}
+      keyboardAppearance={theme.scheme === 'dark' ? 'dark' : 'light'}
+      maxFontSizeMultiplier={theme.type.body.maxFontSizeMultiplier} style={styles.input} {...input} />
   </View>;
 }
 
 export function Button({ title, onPress, disabled, busy, variant = 'primary' }: {
-  title: string; onPress: () => void; disabled?: boolean; busy?: boolean; variant?: 'primary' | 'secondary';
+  title: string; onPress: () => void; disabled?: boolean; busy?: boolean; variant?: ButtonVariant;
 }) {
+  const [styles, theme] = useUiStyles();
   const inactive = Boolean(disabled || busy);
+  const filled = variant === 'primary' || variant === 'destructive';
   return <Pressable accessibilityRole="button" accessibilityState={{ disabled: inactive, busy: Boolean(busy) }}
     disabled={inactive} onPress={onPress}
-    style={({ pressed }) => [styles.button, variant === 'primary' ? styles.primary : styles.secondary, (inactive || pressed) && styles.dim]}>
-    {busy ? <ActivityIndicator color={variant === 'primary' ? '#fff' : '#14685c'} />
-      : <Text style={variant === 'primary' ? styles.primaryText : styles.secondaryText}>{title}</Text>}
+    style={({ pressed }) => [styles.button, styles[variant], (inactive || pressed) && styles.dim]}>
+    {busy ? <ActivityIndicator color={filled ? theme.colors.onAccent : theme.colors.accent} />
+      : <Text maxFontSizeMultiplier={theme.type.body.maxFontSizeMultiplier}
+        style={[styles.buttonText, filled ? styles.onFilled : styles.onPlain]}>{title}</Text>}
   </Pressable>;
 }
 
 export function LinkButton({ title, onPress, disabled }: { title: string; onPress: () => void; disabled?: boolean }) {
+  const [styles, theme] = useUiStyles();
   return <Pressable accessibilityRole="link" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.link, (pressed || disabled) && styles.dim]}>
-    <Text style={styles.linkText}>{title}</Text>
+    <Text maxFontSizeMultiplier={theme.type.body.maxFontSizeMultiplier} style={styles.linkText}>{title}</Text>
   </Pressable>;
 }
 
-export function Notice({ kind, children }: { kind: 'error' | 'info'; children: ReactNode }) {
+export function Notice({ kind, children }: { kind: NoticeKind; children: ReactNode }) {
+  const [styles, theme] = useUiStyles();
   return <View accessibilityRole={kind === 'error' ? 'alert' : undefined} accessibilityLiveRegion="polite"
-    style={kind === 'error' ? styles.error : styles.info}>
-    <Text style={kind === 'error' ? styles.errorText : styles.infoText}>{children}</Text>
+    style={[styles.notice, styles[kind]]}>
+    <Text maxFontSizeMultiplier={theme.type.body.maxFontSizeMultiplier}
+      style={[styles.body, styles[NOTICE_TEXT[kind]]]}>{children}</Text>
   </View>;
 }
 
 export function Loading() {
-  return <View style={styles.center}><ActivityIndicator color="#14685c" size="large" /></View>;
+  const [styles, theme] = useUiStyles();
+  return <View style={styles.center}><ActivityIndicator color={theme.colors.accent} size="large" /></View>;
 }
-
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f4f7f3' },
-  flex: { flex: 1 },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f4f7f3' },
-  page: { padding: 24, gap: 14, width: '100%', maxWidth: 680, alignSelf: 'center', paddingBottom: 40 },
-  title: { fontSize: 28, fontWeight: '800', color: '#173c35', marginTop: 8 },
-  body: { fontSize: 16, lineHeight: 24, color: '#40554f' },
-  field: { gap: 6 },
-  label: { fontSize: 15, fontWeight: '600', color: '#173c35' },
-  input: { backgroundColor: '#fff', borderColor: '#a9bbb3', borderRadius: 10, borderWidth: 1, color: '#173c35', fontSize: 16, padding: 14 },
-  button: { borderRadius: 12, padding: 16, alignItems: 'center', justifyContent: 'center', minHeight: 52 },
-  primary: { backgroundColor: '#14685c' }, primaryText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  secondary: { borderWidth: 1, borderColor: '#14685c' }, secondaryText: { color: '#14685c', fontSize: 16, fontWeight: '600' },
-  dim: { opacity: 0.5 },
-  link: { paddingVertical: 8, alignSelf: 'flex-start' },
-  linkText: { color: '#14685c', fontSize: 16, fontWeight: '600', textDecorationLine: 'underline' },
-  error: { padding: 16, backgroundColor: '#fcebe6', borderRadius: 12 }, errorText: { color: '#8a3220', lineHeight: 22 },
-  info: { padding: 16, backgroundColor: '#e7eee8', borderRadius: 12 }, infoText: { color: '#173c35', lineHeight: 22 },
-});
