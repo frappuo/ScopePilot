@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../../auth/AuthProvider';
 import { MIN_PASSWORD_LENGTH } from '../../auth/policy';
-import { Body, Button, Field, Notice, Screen, Title } from '../../components/ui';
+import { Button, FieldGroup, Notice, PasswordRow, Screen, ScreenHeading, Spacer, TextLink } from '../../components/ui';
 
 export default function SetNewPasswordScreen() {
   const { setNewPassword, cancelRecovery } = useAuth();
@@ -28,15 +28,17 @@ export default function SetNewPasswordScreen() {
     setBusy(false);
   }
 
-  return <Screen>
-    <Title>Choose a new password</Title>
-    <Body>Your code was accepted. Set a new password to continue.</Body>
-    <Field label={`New password (at least ${MIN_PASSWORD_LENGTH} characters)`} value={password} onChangeText={setPassword}
-      secureTextEntry autoCapitalize="none" autoComplete="new-password" textContentType="newPassword" editable={!busy} />
-    <Field label="Confirm new password" value={confirm} onChangeText={setConfirm} secureTextEntry autoCapitalize="none"
-      autoComplete="new-password" textContentType="newPassword" editable={!busy} onSubmitEditing={submit} />
+  return <Screen fill footer={<Button size="large" title="Save new password" onPress={submit} busy={busy} />}>
+    <ScreenHeading title="Choose a new password" subtitle="Your code was accepted. Set a new password to continue." />
+    <FieldGroup>
+      <PasswordRow label={`New password (at least ${MIN_PASSWORD_LENGTH} characters)`}
+        placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`} value={password} onChangeText={setPassword}
+        autoCapitalize="none" autoComplete="new-password" textContentType="newPassword" editable={!busy} />
+      <PasswordRow label="Confirm new password" placeholder="Re-enter your password" value={confirm} onChangeText={setConfirm}
+        autoCapitalize="none" autoComplete="new-password" textContentType="newPassword" editable={!busy} onSubmitEditing={submit} />
+    </FieldGroup>
     {error && <Notice kind="error">{error}</Notice>}
-    <Button title="Save new password" onPress={submit} busy={busy} />
-    <Button variant="secondary" title="Cancel and sign out" onPress={cancel} disabled={busy} />
+    <Spacer />
+    <TextLink role="button" align="center" title="Cancel and sign out" onPress={cancel} disabled={busy} />
   </Screen>;
 }

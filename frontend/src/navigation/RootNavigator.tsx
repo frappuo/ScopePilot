@@ -38,10 +38,10 @@ export default function RootNavigator() {
       {gate === 'auth' ? <Stack.Group screenOptions={authScreenOptions}>
         <Stack.Screen name="SignIn" component={SignInScreen} options={{ headerShown: false }} />
         <Stack.Screen name="SignUp" component={SignUpScreen} options={{ title: 'Create account', headerTitle: '' }} />
-        <Stack.Screen name="VerifyCode" component={VerifyCodeScreen} options={{ title: 'Enter code' }} />
-        <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} options={{ title: 'Forgot password' }} />
+        <Stack.Screen name="VerifyCode" component={VerifyCodeScreen} options={{ title: 'Enter code', headerTitle: '' }} />
+        <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} options={{ title: 'Forgot password', headerTitle: '' }} />
         <Stack.Screen name="SetNewPassword" component={SetNewPasswordScreen}
-          options={{ title: 'New password', headerBackVisible: false, gestureEnabled: false }} />
+          options={{ title: 'New password', headerTitle: '', headerBackVisible: false, gestureEnabled: false }} />
       </Stack.Group> : <>
         <Stack.Screen name="Experiments" component={ExperimentsScreen} options={{ title: 'ScopePilot' }} />
         <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analyze an image' }} />

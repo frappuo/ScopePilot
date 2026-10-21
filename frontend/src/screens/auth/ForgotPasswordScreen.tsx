@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../../auth/AuthProvider';
 import { OTP_CODE_LENGTH, isPlausibleEmail } from '../../auth/policy';
-import { Body, Button, Field, Notice, Screen, Title } from '../../components/ui';
+import { Button, FieldGroup, FieldRow, Notice, Screen, ScreenHeading, Spacer } from '../../components/ui';
 import type { ScreenProps } from '../../navigation/types';
 
 export default function ForgotPasswordScreen({ navigation, route }: ScreenProps<'ForgotPassword'>) {
@@ -21,13 +21,15 @@ export default function ForgotPasswordScreen({ navigation, route }: ScreenProps<
     navigation.navigate('VerifyCode', { email: trimmedEmail, mode: 'recovery', codeSent: true });
   }
 
-  return <Screen>
-    <Title>Forgot your password?</Title>
-    <Body>Enter your email. If an account uses it, we will send a {OTP_CODE_LENGTH}-digit code.</Body>
-    <Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false}
-      autoComplete="email" keyboardType="email-address" textContentType="emailAddress" editable={!busy}
-      onSubmitEditing={submit} />
+  return <Screen fill footer={<Button size="large" title="Send code" onPress={submit} busy={busy} />}>
+    <ScreenHeading title="Forgot your password?"
+      subtitle={`Enter your email. If an account uses it, we will send a ${OTP_CODE_LENGTH}-digit code.`} />
+    <FieldGroup>
+      <FieldRow label="Email" placeholder="name@college.edu" value={email} onChangeText={setEmail} autoCapitalize="none"
+        autoCorrect={false} autoComplete="email" keyboardType="email-address" textContentType="emailAddress" editable={!busy}
+        onSubmitEditing={submit} />
+    </FieldGroup>
     {error && <Notice kind="error">{error}</Notice>}
-    <Button title="Send code" onPress={submit} busy={busy} />
+    <Spacer />
   </Screen>;
 }

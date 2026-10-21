@@ -30,13 +30,18 @@ function reactNative(extra = {}) {
 }
 
 // `stubs` are added to the React Native, safe-area and theme stubs (for example the auth hook).
-function loadScreen(file, stubs = {}, nativeExtra = {}) {
+function loadModule(file, stubs = {}, nativeExtra = {}) {
   return loadTs(file, {
     'react-native': reactNative(nativeExtra),
     'react-native-safe-area-context': { SafeAreaView: host('SafeAreaView') },
     '../theme/ThemeProvider': { useTheme: () => current },
     ...stubs,
-  }).default;
+  });
+}
+
+// The screen component (the default export).
+function loadScreen(file, stubs, nativeExtra) {
+  return loadModule(file, stubs, nativeExtra).default;
 }
 
 function render(scheme, element) {
@@ -73,4 +78,4 @@ function footerHtml(scheme, hosts) {
   return footer ? render(scheme, footer).html : '';
 }
 
-module.exports = { palettes, themes, host, loadScreen, render, flatten, find, coloursOf, textOf, footerHtml };
+module.exports = { palettes, themes, host, loadModule, loadScreen, render, flatten, find, coloursOf, textOf, footerHtml };
