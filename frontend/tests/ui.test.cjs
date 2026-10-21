@@ -77,9 +77,70 @@ for (const scheme of ['light', 'dark']) {
       ]),
       createElement(ui.LinkButton, { title: 'Link', onPress() {} }),
       ...['error', 'info', 'success', 'warning'].map(kind => createElement(ui.Notice, { key: kind, kind }, kind)),
-      createElement(ui.Loading)));
+      createElement(ui.Loading),
+      createElement(ui.BrandHeader),
+      createElement(ui.ScreenHeading, { title: 'Welcome back', subtitle: 'Subtitle' }),
+      createElement(ui.FieldGroup, null,
+        createElement(ui.FieldRow, { label: 'Email', value: '' }),
+        createElement(ui.PasswordRow, { label: 'Password', value: '' })),
+      ...['eye', 'eyeOff', 'account'].map(glyph => createElement(ui.IconButton, { key: glyph, glyph, accessibilityLabel: glyph, onPress() {} })),
+      createElement(ui.IconButton, { glyph: 'account', accessibilityLabel: 'Account', onPress() {}, busy: true }),
+      createElement(ui.TextLink, { title: 'Link', onPress() {} }),
+      createElement(ui.TextLink, { title: 'Action', onPress() {}, role: 'button', disabled: true, align: 'end' }),
+      createElement(ui.InlinePrompt, { prompt: 'New to ScopePilot?', linkTitle: 'Create an account', onPress() {} }),
+      createElement(ui.EmptyState, { title: 'Empty', body: 'Nothing yet.' }),
+      createElement(ui.Button, { title: 'Large', onPress() {}, size: 'large' }),
+      createElement(ui.Spacer)));
     const outside = coloursOf(hosts).filter(colour => !allowed.has(colour));
     assert.deepEqual(outside, []);
+  });
+
+  test(`${scheme}: the field group has a strong boundary and inset hairlines`, () => {
+    const { hosts } = render(scheme, createElement(ui.FieldGroup, null,
+      createElement(ui.FieldRow, { label: 'Email', value: '' }),
+      createElement(ui.FieldRow, { label: 'Name', value: '' })));
+    const group = flatten(find(hosts, 'View')[0].props.style);
+    assert.equal(group.backgroundColor, colors.surface);
+    assert.equal(group.borderColor, colors.borderStrong);
+    assert.equal(group.borderWidth, 1);
+    assert.equal(group.borderRadius, themes[scheme].radius.card);
+    const separators = find(hosts, 'View').map(view => flatten(view.props.style)).filter(style => style.height === 1);
+    assert.equal(separators.length, 1);
+    assert.equal(separators[0].backgroundColor, colors.border);
+    assert.equal(separators[0].marginLeft, 16);
+  });
+
+  test(`${scheme}: field rows use a muted label and a borderless input`, () => {
+    const { hosts } = render(scheme, createElement(ui.FieldRow, { label: 'Email', value: '' }));
+    assert.equal(flatten(find(hosts, 'Text')[0].props.style).color, colors.textMuted);
+    const input = flatten(find(hosts, 'TextInput')[0].props.style);
+    assert.equal(input.color, colors.text);
+    assert.equal(input.backgroundColor, colors.surface);
+    assert.equal(input.fontSize, 17);
+    assert.equal(input.borderWidth, undefined);
+  });
+
+  test(`${scheme}: text links are accent without an underline`, () => {
+    const { hosts } = render(scheme, createElement(ui.TextLink, { title: 'Forgot password?', onPress() {} }));
+    const text = flatten(find(hosts, 'Text')[0].props.style);
+    assert.equal(text.color, colors.accent);
+    assert.equal(text.textDecorationLine, undefined);
+    assert.equal(flatten(find(hosts, 'Pressable')[0].props.style).minHeight, 44);
+  });
+
+  test(`${scheme}: icon glyphs are muted`, () => {
+    for (const glyph of ['eye', 'eyeOff', 'account']) {
+      const { hosts } = render(scheme, createElement(ui.IconButton, { glyph, accessibilityLabel: glyph, onPress() {} }));
+      assert.deepEqual([...new Set(coloursOf(hosts))], [colors.textMuted], glyph);
+    }
+  });
+
+  test(`${scheme}: the large button is 54 tall with the button radius`, () => {
+    const { hosts } = render(scheme, createElement(ui.Button, { title: 'Sign in', onPress() {}, size: 'large' }));
+    const pressable = flatten(find(hosts, 'Pressable')[0].props.style);
+    assert.equal(pressable.minHeight, 54);
+    assert.equal(pressable.borderRadius, 14);
+    assert.equal(pressable.backgroundColor, colors.accent);
   });
 
   test(`${scheme}: button variants use their tokens`, () => {
@@ -177,6 +238,93 @@ test('bodyLarge is 17/24 and has its own text style', () => {
   assert.equal(flatten(text.style).fontSize, 17);
   assert.equal(flatten(text.style).maxFontSizeMultiplier, undefined);
   assert.equal(text.maxFontSizeMultiplier, 2);
+});
+
+test('a regular button keeps today\'s size', () => {
+  const { hosts } = render('light', createElement(ui.Button, { title: 'Go', onPress() {} }));
+  const pressable = flatten(find(hosts, 'Pressable')[0].props.style);
+  assert.equal(pressable.minHeight, 52);
+  assert.equal(pressable.borderRadius, 12);
+});
+
+test('passwordToggle labels follow the state', () => {
+  assert.deepEqual(ui.passwordToggle(false), { secureTextEntry: true, accessibilityLabel: 'Show password', glyph: 'eye' });
+  assert.deepEqual(ui.passwordToggle(true), { secureTextEntry: false, accessibilityLabel: 'Hide password', glyph: 'eyeOff' });
+});
+
+test('a password row starts hidden with a 44 pt "Show password" button', () => {
+  const { hosts } = render('light', createElement(ui.PasswordRow, { label: 'Password', secureTextEntry: false }));
+  const input = find(hosts, 'TextInput')[0].props;
+  assert.equal(input.secureTextEntry, true);
+  assert.equal(input.accessibilityLabel, 'Password');
+  const toggle = find(hosts, 'Pressable')[0].props;
+  assert.equal(toggle.accessibilityRole, 'button');
+  assert.equal(toggle.accessibilityLabel, 'Show password');
+  assert.equal(flatten(toggle.style).width, 44);
+  assert.equal(flatten(toggle.style).height, 44);
+});
+
+test('icon buttons report role, label and state', () => {
+  const idle = render('light', createElement(ui.IconButton, { glyph: 'account', accessibilityLabel: 'Account', onPress() {} }));
+  const pressable = find(idle.hosts, 'Pressable')[0].props;
+  assert.equal(pressable.accessibilityRole, 'button');
+  assert.equal(pressable.accessibilityLabel, 'Account');
+  assert.deepEqual(pressable.accessibilityState, { disabled: false, busy: false });
+  assert.equal(find(idle.hosts, 'ActivityIndicator').length, 0);
+  const busy = render('light', createElement(ui.IconButton, { glyph: 'account', accessibilityLabel: 'Account', onPress() {}, busy: true }));
+  assert.deepEqual(find(busy.hosts, 'Pressable')[0].props.accessibilityState, { disabled: true, busy: true });
+  assert.equal(find(busy.hosts, 'ActivityIndicator').length, 1);
+});
+
+test('text links default to the link role; role="button" keeps a button role and its state', () => {
+  const link = render('light', createElement(ui.TextLink, { title: 'Forgot password?', onPress() {} }));
+  const linkProps = find(link.hosts, 'Pressable')[0].props;
+  assert.equal(linkProps.accessibilityRole, 'link');
+  assert.deepEqual(linkProps.accessibilityState, { disabled: false });
+  assert.match(link.html, /Forgot password\?/);
+  const action = render('light', createElement(ui.TextLink, { title: 'Send a new code', onPress() {}, role: 'button', disabled: true }));
+  const actionProps = find(action.hosts, 'Pressable')[0].props;
+  assert.equal(actionProps.accessibilityRole, 'button');
+  assert.deepEqual(actionProps.accessibilityState, { disabled: true });
+  assert.equal(actionProps.disabled, true);
+});
+
+test('field rows label their input, allow overrides and use the dark keyboard in dark mode', () => {
+  const row = render('dark', createElement(ui.FieldRow, { label: 'Email' }));
+  const input = find(row.hosts, 'TextInput')[0].props;
+  assert.equal(input.accessibilityLabel, 'Email');
+  assert.equal(input.keyboardAppearance, 'dark');
+  const overridden = render('light', createElement(ui.FieldRow, { label: 'Code', accessibilityLabel: 'Six-digit code' }));
+  assert.equal(find(overridden.hosts, 'TextInput')[0].props.accessibilityLabel, 'Six-digit code');
+});
+
+test('field rows still call the caller\'s focus handlers', () => {
+  const calls = [];
+  const { hosts } = render('light', createElement(ui.FieldRow, {
+    label: 'Email', onFocus: () => calls.push('focus'), onBlur: () => calls.push('blur'),
+  }));
+  const input = find(hosts, 'TextInput')[0].props;
+  // The server renderer ignores state updates after rendering; only the callbacks matter here.
+  input.onFocus({});
+  input.onBlur({});
+  assert.deepEqual(calls, ['focus', 'blur']);
+});
+
+test('the brand mark is hidden from assistive tech and the wordmark reads ScopePilot', () => {
+  const { html, hosts } = render('light', createElement(ui.BrandHeader));
+  const mark = find(hosts, 'View')[1].props;
+  assert.equal(mark.accessible, false);
+  assert.equal(mark.importantForAccessibility, 'no-hide-descendants');
+  assert.equal(mark.accessibilityElementsHidden, true);
+  assert.match(html, /ScopePilot/);
+});
+
+test('the screen heading is a header with a muted subtitle', () => {
+  const { hosts } = render('light', createElement(ui.ScreenHeading, { title: 'Welcome back', subtitle: 'Sign in.' }));
+  const [title, subtitle] = find(hosts, 'Text');
+  assert.equal(title.props.accessibilityRole, 'header');
+  assert.equal(flatten(title.props.style).fontSize, 34);
+  assert.equal(flatten(subtitle.props.style).color, palettes.light.textMuted);
 });
 
 test('dark mode uses the dark keyboard and scroll indicator', () => {
