@@ -1,4 +1,4 @@
-import { Children, Fragment, useState, type ReactNode } from 'react';
+import { Children, Fragment, useRef, useState, type ReactNode } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type StyleProp, type TextInputProps, type TextProps, type ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../theme/ThemeProvider';
@@ -23,6 +23,9 @@ export function makeUiStyles(theme: Theme) {
     flex: { flex: 1 },
     center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.canvas },
     page: { padding: spacing.xl, gap: spacing.lg, width: '100%', maxWidth: layout.maxWidth, alignSelf: 'center', paddingBottom: spacing.xxl + spacing.sm },
+    pageFill: { flexGrow: 1 },
+    footer: { backgroundColor: colors.canvas },
+    footerInner: { width: '100%', maxWidth: layout.maxWidth, alignSelf: 'center', paddingHorizontal: spacing.xl, paddingTop: spacing.md, paddingBottom: spacing.lg },
     card: { backgroundColor: colors.surface, borderRadius: radius.card, padding: spacing.lg, gap: spacing.sm, ...theme.elevation },
     cardMuted: { backgroundColor: colors.surfaceMuted, borderRadius: radius.card, padding: spacing.lg, gap: spacing.sm },
     display: typeStyle(theme, 'display'),
@@ -107,15 +110,26 @@ const NOTICE_TEXT: Record<NoticeKind, 'errorText' | 'infoText' | 'successText' |
   error: 'errorText', info: 'infoText', success: 'successText', warning: 'warningText',
 };
 
-export function Screen({ children, edges = ['bottom', 'left', 'right'] }: { children: ReactNode; edges?: ('top' | 'bottom' | 'left' | 'right')[] }) {
+// `footer` stays pinned below the scrolling content and rises with the keyboard; `fill` lets a
+// Spacer push the last content line to the bottom.
+export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, fill }: {
+  children: ReactNode; edges?: ('top' | 'bottom' | 'left' | 'right')[]; footer?: ReactNode; fill?: boolean;
+}) {
   const [styles, theme] = useUiStyles();
+  // KeyboardAvoidingView compares its own frame with the keyboard's window position, so it needs
+  // to know where it sits in the window (below a native header, for example).
+  const frame = useRef<View>(null);
+  const [offset, setOffset] = useState(0);
   return <SafeAreaView edges={edges} style={styles.safe}>
-    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.flex}>
-      <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled"
-        indicatorStyle={theme.scheme === 'dark' ? 'white' : 'default'}>
-        {children}
-      </ScrollView>
-    </KeyboardAvoidingView>
+    <View ref={frame} style={styles.flex} onLayout={() => frame.current?.measureInWindow((_x, y) => setOffset(y))}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={offset} style={styles.flex}>
+        <ScrollView contentContainerStyle={[styles.page, fill && styles.pageFill]} keyboardShouldPersistTaps="handled"
+          indicatorStyle={theme.scheme === 'dark' ? 'white' : 'default'}>
+          {children}
+        </ScrollView>
+        {footer ? <View style={styles.footer}><View style={styles.footerInner}>{footer}</View></View> : null}
+      </KeyboardAvoidingView>
+    </View>
   </SafeAreaView>;
 }
 

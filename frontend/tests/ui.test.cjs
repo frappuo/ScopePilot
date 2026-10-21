@@ -163,6 +163,13 @@ for (const scheme of ['light', 'dark']) {
     const { hosts } = render(scheme, createElement(ui.Screen, null, 'Content'));
     assert.equal(flatten(find(hosts, 'SafeAreaView')[0].props.style).backgroundColor, colors.canvas);
   });
+
+  test(`${scheme}: a screen footer sits on the canvas and uses only palette colours`, () => {
+    const { hosts } = render(scheme, createElement(ui.Screen, { footer: createElement(ui.Button, { title: 'Sign in', onPress() {}, size: 'large' }) }, 'Content'));
+    const footer = find(hosts, 'View').map(view => flatten(view.props.style)).find(style => style.backgroundColor === colors.canvas);
+    assert.ok(footer, 'footer view');
+    assert.deepEqual(coloursOf(hosts).filter(colour => !allowed.has(colour)), []);
+  });
 }
 
 test('the default button keeps its role, state and label', () => {
@@ -325,6 +332,37 @@ test('the screen heading is a header with a muted subtitle', () => {
   assert.equal(title.props.accessibilityRole, 'header');
   assert.equal(flatten(title.props.style).fontSize, 34);
   assert.equal(flatten(subtitle.props.style).color, palettes.light.textMuted);
+});
+
+test('the footer renders outside the scroll view, after the content', () => {
+  const { html, hosts } = render('light', createElement(ui.Screen, { footer: 'Footer' }, 'Content'));
+  assert.equal(find(hosts, 'ScrollView')[0].props.children, 'Content');
+  const avoiding = find(hosts, 'KeyboardAvoidingView')[0].props;
+  assert.equal(Array.isArray(avoiding.children), true);
+  assert.equal(avoiding.children.length, 2);
+  assert.ok(html.indexOf('Content') < html.indexOf('Footer'));
+});
+
+test('without a footer or fill the screen keeps today\'s content layout', () => {
+  const { hosts } = render('light', createElement(ui.Screen, null, 'Content'));
+  const views = find(hosts, 'View');
+  assert.equal(views.length, 1); // only the measuring wrapper
+  assert.equal(flatten(find(hosts, 'ScrollView')[0].props.contentContainerStyle).flexGrow, undefined);
+  assert.equal(find(hosts, 'ScrollView')[0].props.keyboardShouldPersistTaps, 'handled');
+});
+
+test('fill lets the content grow to the screen height', () => {
+  const { hosts } = render('light', createElement(ui.Screen, { fill: true }, 'Content'));
+  assert.equal(flatten(find(hosts, 'ScrollView')[0].props.contentContainerStyle).flexGrow, 1);
+});
+
+test('the keyboard offset starts at 0 and is measured on layout', () => {
+  const { hosts } = render('light', createElement(ui.Screen, null, 'Content'));
+  assert.equal(find(hosts, 'KeyboardAvoidingView')[0].props.keyboardVerticalOffset, 0);
+  const wrapper = find(hosts, 'View')[0].props;
+  assert.equal(typeof wrapper.onLayout, 'function');
+  // Without a mounted native view there is nothing to measure, and the handler must not throw.
+  assert.doesNotThrow(() => wrapper.onLayout({}));
 });
 
 test('dark mode uses the dark keyboard and scroll indicator', () => {
