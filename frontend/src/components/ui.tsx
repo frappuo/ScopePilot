@@ -27,6 +27,7 @@ export function makeUiStyles(theme: Theme) {
     display: typeStyle(theme, 'display'),
     title: { ...typeStyle(theme, 'title'), marginTop: spacing.sm },
     headline: typeStyle(theme, 'headline'),
+    bodyLarge: typeStyle(theme, 'bodyLarge'),
     body: typeStyle(theme, 'body'),
     label: typeStyle(theme, 'label'),
     caption: typeStyle(theme, 'caption'),

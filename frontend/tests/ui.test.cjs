@@ -169,6 +169,16 @@ test('text variants cap font scaling from the type scale', () => {
   assert.equal(find(hosts, 'Text')[0].props.maxFontSizeMultiplier, themes.light.type.display.maxFontSizeMultiplier);
 });
 
+test('bodyLarge is 17/24 and has its own text style', () => {
+  assert.deepEqual(themes.light.type.bodyLarge, { fontSize: 17, lineHeight: 24, fontWeight: '400', maxFontSizeMultiplier: 2 });
+  assert.equal(themes.light.radius.button, 14);
+  const { hosts } = render('light', createElement(ui.AppText, { variant: 'bodyLarge' }, 'Input text'));
+  const text = find(hosts, 'Text')[0].props;
+  assert.equal(flatten(text.style).fontSize, 17);
+  assert.equal(flatten(text.style).maxFontSizeMultiplier, undefined);
+  assert.equal(text.maxFontSizeMultiplier, 2);
+});
+
 test('dark mode uses the dark keyboard and scroll indicator', () => {
   const field = render('dark', createElement(ui.Field, { label: 'Email' }));
   assert.equal(find(field.hosts, 'TextInput')[0].props.keyboardAppearance, 'dark');

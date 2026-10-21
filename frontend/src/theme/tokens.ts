@@ -73,11 +73,11 @@ export const palettes: Record<ColorScheme, ColorTokens> = {
 // 4-pt scale.
 export const spacing = { xxs: 2, xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32, xxxl: 48 } as const;
 
-export const radius = { sm: 8, control: 12, card: 18, pill: 999 } as const;
+export const radius = { sm: 8, control: 12, button: 14, card: 18, pill: 999 } as const;
 
 export const layout = { maxWidth: 680, minTouch: 44 } as const;
 
-export type TypeVariant = 'display' | 'title' | 'headline' | 'body' | 'label' | 'caption';
+export type TypeVariant = 'display' | 'title' | 'headline' | 'bodyLarge' | 'body' | 'label' | 'caption';
 
 export type TypeStyle = Pick<TextStyle, 'fontSize' | 'lineHeight' | 'fontWeight' | 'letterSpacing'> & {
   maxFontSizeMultiplier: number;
@@ -89,6 +89,7 @@ export const typeScale: Record<TypeVariant, TypeStyle> = {
   display: { fontSize: 34, lineHeight: 41, fontWeight: '700', maxFontSizeMultiplier: 1.5 },
   title: { fontSize: 28, lineHeight: 34, fontWeight: '700', maxFontSizeMultiplier: 1.6 },
   headline: { fontSize: 20, lineHeight: 26, fontWeight: '600', maxFontSizeMultiplier: 1.8 },
+  bodyLarge: { fontSize: 17, lineHeight: 24, fontWeight: '400', maxFontSizeMultiplier: 2 },
   body: { fontSize: 16, lineHeight: 24, fontWeight: '400', maxFontSizeMultiplier: 2 },
   label: { fontSize: 13, lineHeight: 18, fontWeight: '600', letterSpacing: 0.4, maxFontSizeMultiplier: 2 },
   caption: { fontSize: 13, lineHeight: 18, fontWeight: '400', maxFontSizeMultiplier: 2 },
