@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useAuth } from '../../auth/AuthProvider';
 import { isPlausibleEmail } from '../../auth/policy';
-import { Body, Button, Field, LinkButton, Notice, Screen, Title } from '../../components/ui';
+import {
+  BrandHeader, Button, FieldGroup, FieldRow, InlinePrompt, Notice, PasswordRow, Screen, ScreenHeading, Spacer, TextLink,
+} from '../../components/ui';
 import type { ScreenProps } from '../../navigation/types';
 
 const NOTICES = {
@@ -31,18 +33,22 @@ export default function SignInScreen({ navigation }: ScreenProps<'SignIn'>) {
     setError(result.message);
   }
 
-  return <Screen edges={['top', 'bottom', 'left', 'right']}>
-    <Title>Sign in to ScopePilot</Title>
-    <Body>Your experiments are saved to your account.</Body>
+  return <Screen edges={['top', 'bottom', 'left', 'right']} fill
+    footer={<Button size="large" title="Sign in" onPress={submit} busy={busy} />}>
+    <BrandHeader />
+    <ScreenHeading title="Welcome back" subtitle="Sign in to your microscopy logbook." />
+    <FieldGroup>
+      <FieldRow label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false}
+        autoComplete="email" keyboardType="email-address" textContentType="emailAddress" editable={!busy} />
+      <PasswordRow label="Password" value={password} onChangeText={setPassword} autoCapitalize="none"
+        autoComplete="current-password" textContentType="password" editable={!busy} onSubmitEditing={submit} />
+    </FieldGroup>
     {state.notice && <Notice kind="info">{NOTICES[state.notice]}</Notice>}
-    <Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false}
-      autoComplete="email" keyboardType="email-address" textContentType="emailAddress" editable={!busy} />
-    <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none"
-      autoComplete="current-password" textContentType="password" editable={!busy} onSubmitEditing={submit} />
     {error && <Notice kind="error">{error}</Notice>}
-    <Button title="Sign in" onPress={submit} busy={busy} />
-    <LinkButton title="Forgot password?" disabled={busy}
+    <TextLink title="Forgot password?" align="end" disabled={busy}
       onPress={() => navigation.navigate('ForgotPassword', { email: trimmedEmail || undefined })} />
-    <LinkButton title="Create an account" disabled={busy} onPress={() => navigation.navigate('SignUp')} />
+    <Spacer />
+    <InlinePrompt prompt="New to ScopePilot?" linkTitle="Create an account" disabled={busy}
+      onPress={() => navigation.navigate('SignUp')} />
   </Screen>;
 }

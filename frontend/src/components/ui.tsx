@@ -61,7 +61,8 @@ export function makeUiStyles(theme: Theme) {
     info: { backgroundColor: colors.infoSoft }, infoText: { color: colors.text },
     success: { backgroundColor: colors.successSoft }, successText: { color: colors.success },
     warning: { backgroundColor: colors.warningSoft }, warningText: { color: colors.warning },
-    brand: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xxxl + spacing.sm },
+    // 40 plus the page's 16 px gap leaves 56 px below the brand row.
+    brand: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xxl + spacing.sm },
     brandMark: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
     brandRing: { width: 22, height: 22, borderRadius: radius.pill, borderWidth: 2, borderColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
     brandLens: { width: 10, height: 10, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentSoft },
