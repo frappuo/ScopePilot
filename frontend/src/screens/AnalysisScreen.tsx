@@ -3,10 +3,13 @@ import { ActivityIndicator, Dimensions, Image, Keyboard, KeyboardAvoidingView, P
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { analyzeImage, askQuestion, generateQuiz } from '../services/api';
 import { selectImage } from '../services/images';
+import { useTheme } from '../theme/ThemeProvider';
+import type { Theme, TypeVariant } from '../theme/tokens';
 import type { Analysis, SelectedImage } from '../types/analysis';
 import type { Quiz } from '../types/quiz';
 
 function Section({ title, content }: { title: string; content: string | string[] }) {
+  const [styles] = useAnalysisStyles();
   return <View style={styles.section}>
     <Text accessibilityRole="header" style={styles.sectionTitle}>{title}</Text>
     {Array.isArray(content)
@@ -17,6 +20,7 @@ function Section({ title, content }: { title: string; content: string | string[]
 }
 
 export default function AnalysisScreen() {
+  const [styles, theme] = useAnalysisStyles();
   const [image, setImage] = useState<SelectedImage | null>(null);
   const [result, setResult] = useState<Analysis | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -157,7 +161,7 @@ export default function AnalysisScreen() {
         style={({ pressed }) => [styles.button, styles.primary, (!image || unavailable || pressed) && styles.dim]}>
         <Text style={styles.primaryText}>{stage === 'analyzing' ? 'Analyzing…' : 'Analyze image'}</Text>
       </Pressable>
-      {stage !== 'idle' && <View accessibilityLiveRegion="polite" style={styles.loading}><ActivityIndicator color="#14685c" /><Text style={styles.body}>{stage === 'analyzing' ? 'Examining your image. This may take a minute.' : 'Preparing your image…'}</Text></View>}
+      {stage !== 'idle' && <View accessibilityLiveRegion="polite" style={styles.loading}><ActivityIndicator color={theme.colors.accent} /><Text style={styles.body}>{stage === 'analyzing' ? 'Examining your image. This may take a minute.' : 'Preparing your image…'}</Text></View>}
       {error && <View accessibilityRole="alert" style={styles.error}><Text style={styles.errorText}>{error}</Text></View>}
       {result && <View accessibilityLiveRegion="polite" style={styles.results}>
         <Text accessibilityRole="header" style={styles.resultHeading}>Your observations</Text>
@@ -177,6 +181,7 @@ export default function AnalysisScreen() {
               onChangeText={setQuestion}
               onFocus={() => requestAnimationFrame(() => scrollQuestionIntoView())}
               placeholder="Why might this structure be visible?"
+              placeholderTextColor={theme.colors.textMuted}
               style={styles.questionInput}
               value={question}
             />
@@ -188,7 +193,7 @@ export default function AnalysisScreen() {
             </Pressable>
           </View>
           {isAsking && <View accessibilityLiveRegion="polite" style={styles.loading}>
-            <ActivityIndicator color="#14685c" /><Text style={styles.body}>Preparing an educational answer…</Text>
+            <ActivityIndicator color={theme.colors.accent} /><Text style={styles.body}>Preparing an educational answer…</Text>
           </View>}
           {askError && <View accessibilityRole="alert" style={styles.error}><Text style={styles.errorText}>{askError}</Text></View>}
           {answer && <View accessibilityLiveRegion="polite" style={styles.answer}>
@@ -246,41 +251,68 @@ export default function AnalysisScreen() {
   </SafeAreaView>;
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#f4f7f3' },
-  flex: { flex: 1 },
-  page: { padding: 24, gap: 12, width: '100%', maxWidth: 680, alignSelf: 'center', paddingBottom: 40 },
-  eyebrow: { color: '#14685c', fontSize: 11, fontWeight: '700', letterSpacing: 2, marginTop: 12 },
-  title: { fontSize: 36, fontWeight: '800', color: '#173c35' },
-  intro: { fontSize: 22, fontWeight: '600', color: '#173c35', marginTop: 8 },
-  body: { fontSize: 16, lineHeight: 24, color: '#40554f' },
-  preview: { backgroundColor: '#e7eee8', borderRadius: 18, overflow: 'hidden', marginVertical: 10 },
-  image: { width: '100%', height: 280 },
-  empty: { minHeight: 220, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 10 },
-  hint: { color: '#596d65', textAlign: 'center', lineHeight: 22 },
-  button: { borderRadius: 12, padding: 16, alignItems: 'center', minHeight: 52 },
-  primary: { backgroundColor: '#14685c' }, primaryText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  secondary: { borderWidth: 1, borderColor: '#14685c' }, secondaryText: { color: '#14685c', fontSize: 16, fontWeight: '600' },
-  dim: { opacity: 0.5 }, loading: { flexDirection: 'row', gap: 12, alignItems: 'center', flexWrap: 'wrap', paddingVertical: 8 },
-  error: { padding: 16, backgroundColor: '#fcebe6', borderRadius: 12 }, errorText: { color: '#8a3220', lineHeight: 22 },
-  results: { gap: 12, marginTop: 20 }, resultHeading: { fontSize: 24, fontWeight: '700', color: '#173c35' },
-  section: { backgroundColor: '#fff', borderRadius: 14, padding: 18, gap: 8 },
-  sectionTitle: { fontSize: 17, fontWeight: '700', color: '#173c35' },
-  followUp: { backgroundColor: '#e7eee8', borderRadius: 14, padding: 18, gap: 12 },
-  quizPanel: { backgroundColor: '#e7eee8', borderRadius: 14, padding: 18, gap: 12 },
-  quizContent: { gap: 12 },
-  quizQuestion: { color: '#173c35', fontSize: 19, fontWeight: '700', lineHeight: 27 },
-  options: { gap: 10 },
-  option: { backgroundColor: '#fff', borderColor: '#a9bbb3', borderRadius: 10, borderWidth: 1, padding: 14 },
-  optionCorrect: { borderColor: '#14685c', backgroundColor: '#d7eee4' },
-  optionWrong: { borderColor: '#c9362b', backgroundColor: '#fde2e1' },
-  optionPressed: { opacity: 0.75 },
-  optionText: { color: '#173c35', fontSize: 16, lineHeight: 22 },
-  optionWrongText: { color: '#8a1c14' },
-  feedback: { backgroundColor: '#fff', borderRadius: 12, gap: 8, padding: 16 },
-  score: { color: '#14685c', fontSize: 22, fontWeight: '800', textAlign: 'center' },
-  questionControls: { gap: 12 },
-  questionInput: { backgroundColor: '#fff', borderColor: '#a9bbb3', borderRadius: 10, borderWidth: 1, color: '#173c35', fontSize: 16, minHeight: 96, padding: 14, textAlignVertical: 'top' },
-  answer: { backgroundColor: '#fff', borderRadius: 12, gap: 8, padding: 16 },
-  note: { color: '#60716a', fontSize: 13, lineHeight: 20, marginTop: 16 },
-});
+function typeStyle(theme: Theme, variant: TypeVariant) {
+  const { maxFontSizeMultiplier: _cap, ...style } = theme.type[variant];
+  return style;
+}
+
+// Colours and type come from the theme; spacing and sizes are unchanged.
+export function makeAnalysisStyles(theme: Theme) {
+  const { colors } = theme;
+  return StyleSheet.create({
+    safe: { flex: 1, backgroundColor: colors.canvas },
+    flex: { flex: 1 },
+    page: { padding: 24, gap: 12, width: '100%', maxWidth: 680, alignSelf: 'center', paddingBottom: 40 },
+    eyebrow: { ...typeStyle(theme, 'label'), color: colors.accent, letterSpacing: 2, marginTop: 12 },
+    title: { ...typeStyle(theme, 'display'), color: colors.text },
+    intro: { ...typeStyle(theme, 'headline'), color: colors.text, marginTop: 8 },
+    body: { ...typeStyle(theme, 'body'), color: colors.text },
+    preview: { backgroundColor: colors.surfaceMuted, borderRadius: 18, overflow: 'hidden', marginVertical: 10 },
+    image: { width: '100%', height: 280 },
+    empty: { minHeight: 220, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 10 },
+    hint: { ...typeStyle(theme, 'body'), color: colors.textMuted, textAlign: 'center' },
+    button: { borderRadius: 12, padding: 16, alignItems: 'center', minHeight: 52 },
+    primary: { backgroundColor: colors.accent },
+    primaryText: { ...typeStyle(theme, 'body'), fontWeight: theme.type.label.fontWeight, color: colors.onAccent },
+    secondary: { borderWidth: 1, borderColor: colors.borderStrong },
+    secondaryText: { ...typeStyle(theme, 'body'), fontWeight: theme.type.label.fontWeight, color: colors.accent },
+    dim: { opacity: 0.5 }, loading: { flexDirection: 'row', gap: 12, alignItems: 'center', flexWrap: 'wrap', paddingVertical: 8 },
+    error: { padding: 16, backgroundColor: colors.dangerSoft, borderRadius: 12 },
+    errorText: { ...typeStyle(theme, 'body'), color: colors.danger },
+    results: { gap: 12, marginTop: 20 }, resultHeading: { ...typeStyle(theme, 'title'), color: colors.text },
+    section: { backgroundColor: colors.surface, borderRadius: 14, padding: 18, gap: 8 },
+    sectionTitle: { ...typeStyle(theme, 'headline'), color: colors.text },
+    followUp: { backgroundColor: colors.surfaceMuted, borderRadius: 14, padding: 18, gap: 12 },
+    quizPanel: { backgroundColor: colors.surfaceMuted, borderRadius: 14, padding: 18, gap: 12 },
+    quizContent: { gap: 12 },
+    quizQuestion: { ...typeStyle(theme, 'headline'), color: colors.text },
+    options: { gap: 10 },
+    option: { backgroundColor: colors.surface, borderColor: colors.borderStrong, borderRadius: 10, borderWidth: 1, padding: 14 },
+    optionCorrect: { borderColor: colors.success, backgroundColor: colors.successSoft },
+    optionWrong: { borderColor: colors.danger, backgroundColor: colors.dangerSoft },
+    optionPressed: { opacity: 0.75 },
+    optionText: { ...typeStyle(theme, 'body'), color: colors.text },
+    optionWrongText: { color: colors.danger },
+    feedback: { backgroundColor: colors.surface, borderRadius: 12, gap: 8, padding: 16 },
+    score: { ...typeStyle(theme, 'title'), color: colors.accent, textAlign: 'center' },
+    questionControls: { gap: 12 },
+    questionInput: {
+      ...typeStyle(theme, 'body'), backgroundColor: colors.surface, borderColor: colors.borderStrong, borderRadius: 10,
+      borderWidth: 1, color: colors.text, minHeight: 96, padding: 14, textAlignVertical: 'top',
+    },
+    answer: { backgroundColor: colors.surface, borderRadius: 12, gap: 8, padding: 16 },
+    note: { ...typeStyle(theme, 'caption'), color: colors.textMuted, marginTop: 16 },
+  });
+}
+
+type AnalysisStyles = ReturnType<typeof makeAnalysisStyles>;
+
+// One style sheet per theme object, as in components/ui.tsx.
+const stylesByTheme = new WeakMap<Theme, AnalysisStyles>();
+
+function useAnalysisStyles(): [AnalysisStyles, Theme] {
+  const theme = useTheme();
+  let styles = stylesByTheme.get(theme);
+  if (!styles) { styles = makeAnalysisStyles(theme); stylesByTheme.set(theme, styles); }
+  return [styles, theme];
+}
