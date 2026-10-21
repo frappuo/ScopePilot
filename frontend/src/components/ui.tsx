@@ -9,7 +9,7 @@ import type { Theme, TypeVariant } from '../theme/tokens';
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive';
 type NoticeKind = 'error' | 'info' | 'success' | 'warning';
 type TextTone = 'default' | 'muted' | 'accent' | 'danger';
-type Glyph = 'eye' | 'eyeOff' | 'account';
+type Glyph = 'account';
 
 function typeStyle(theme: Theme, variant: TypeVariant) {
   const { maxFontSizeMultiplier: _cap, ...style } = theme.type[variant];
@@ -77,9 +77,7 @@ export function makeUiStyles(theme: Theme) {
     rowInput: { ...typeStyle(theme, 'bodyLarge'), color: colors.text, backgroundColor: colors.surface, minHeight: 24, padding: 0 },
     iconButton: { width: layout.minTouch, height: layout.minTouch, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
     glyph: { width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
-    eyeOutline: { width: 20, height: 12, borderRadius: radius.pill, borderWidth: 2, borderColor: colors.textMuted, alignItems: 'center', justifyContent: 'center' },
-    pupil: { width: 6, height: 6, borderRadius: radius.pill, backgroundColor: colors.textMuted },
-    slash: { position: 'absolute', width: 24, height: 2, borderRadius: 1, backgroundColor: colors.textMuted, transform: [{ rotate: '-35deg' }] },
+    revealToggle: { minWidth: layout.minTouch, minHeight: layout.minTouch, paddingHorizontal: spacing.xs, alignItems: 'center', justifyContent: 'center' },
     head: { width: 9, height: 9, borderRadius: radius.pill, borderWidth: 2, borderColor: colors.textMuted },
     shoulders: { width: 16, height: 8, marginTop: 2, borderTopLeftRadius: 8, borderTopRightRadius: 8, borderWidth: 2, borderBottomWidth: 0, borderColor: colors.textMuted },
     textLink: { minHeight: layout.minTouch, justifyContent: 'center' },
@@ -252,28 +250,28 @@ export function FieldRow({ label, trailing, onFocus, onBlur, ...input }: TextInp
   </View>;
 }
 
-export function passwordToggle(revealed: boolean): { secureTextEntry: boolean; accessibilityLabel: string; glyph: Glyph } {
+export function passwordToggle(revealed: boolean): { secureTextEntry: boolean; accessibilityLabel: string; title: string } {
   return revealed
-    ? { secureTextEntry: false, accessibilityLabel: 'Hide password', glyph: 'eyeOff' }
-    : { secureTextEntry: true, accessibilityLabel: 'Show password', glyph: 'eye' };
+    ? { secureTextEntry: false, accessibilityLabel: 'Hide password', title: 'Hide' }
+    : { secureTextEntry: true, accessibilityLabel: 'Show password', title: 'Show' };
 }
 
+// A "Show" / "Hide" text toggle; the spoken label names the password.
 export function PasswordRow(props: TextInputProps & { label: string }) {
+  const [styles, theme] = useUiStyles();
   const [revealed, setRevealed] = useState(false);
   const toggle = passwordToggle(revealed);
   return <FieldRow {...props} secureTextEntry={toggle.secureTextEntry}
-    trailing={<IconButton glyph={toggle.glyph} accessibilityLabel={toggle.accessibilityLabel}
-      onPress={() => setRevealed(value => !value)} />} />;
+    trailing={<Pressable accessibilityRole="button" accessibilityLabel={toggle.accessibilityLabel}
+      onPress={() => setRevealed(value => !value)} style={({ pressed }) => [styles.revealToggle, pressed && styles.dim]}>
+      <Text maxFontSizeMultiplier={theme.type.body.maxFontSizeMultiplier} style={styles.textLinkText}>{toggle.title}</Text>
+    </Pressable>} />;
 }
 
 function GlyphView({ glyph }: { glyph: Glyph }) {
   const [styles] = useUiStyles();
-  if (glyph === 'account') {
-    return <View style={styles.glyph}><View style={styles.head} /><View style={styles.shoulders} /></View>;
-  }
-  return <View style={styles.glyph}>
-    <View style={styles.eyeOutline}><View style={styles.pupil} /></View>
-    {glyph === 'eyeOff' && <View style={styles.slash} />}
+  return <View style={styles.glyph} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+    {glyph === 'account' && <><View style={styles.head} /><View style={styles.shoulders} /></>}
   </View>;
 }
 

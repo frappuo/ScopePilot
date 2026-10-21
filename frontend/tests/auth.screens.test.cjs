@@ -1,7 +1,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { createElement } = require('react');
-const { palettes, loadScreen, render, find, coloursOf, textOf, footerHtml } = require('./helpers/screenHarness.cjs');
+const { palettes, loadScreen, render, find, flatten, coloursOf, textOf, footerHtml } = require('./helpers/screenHarness.cjs');
 
 // What the stubbed useAuth returns; tests change `notice`.
 const auth = {
@@ -56,7 +58,30 @@ test('sign in: new heading, quiet links and the button in the footer', () => {
   assert.deepEqual(find(hosts, 'TextInput').map(input => input.props.accessibilityLabel), ['Email', 'Password']);
   assert.equal(find(hosts, 'TextInput')[1].props.secureTextEntry, true);
   assert.equal(find(hosts, 'Pressable').filter(entry => entry.props.accessibilityLabel === 'Show password').length, 1);
+  assert.deepEqual(find(hosts, 'TextInput').map(input => input.props.placeholder), ['name@college.edu', 'Your password']);
   assert.match(footerHtml('light', hosts), /Sign in/);
+});
+
+for (const scheme of ['light', 'dark']) {
+  test(`${scheme}: placeholders are muted and password toggles read Show`, () => {
+    for (const Screen of [SignIn, SignUp]) {
+      const { hosts } = render(scheme, createElement(Screen, { navigation: navigation() }));
+      for (const input of find(hosts, 'TextInput')) assert.equal(input.props.placeholderTextColor, palettes[scheme].textMuted);
+      const toggles = find(hosts, 'Text').filter(text => textOf(text) === 'Show');
+      assert.equal(toggles.length, find(hosts, 'Pressable').filter(entry => entry.props.accessibilityLabel === 'Show password').length);
+      for (const toggle of toggles) assert.equal(flatten(toggle.props.style).color, palettes[scheme].accent);
+    }
+  });
+}
+
+test('auth back buttons show only the chevron', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'navigation', 'RootNavigator.tsx'), 'utf8');
+  assert.match(source, /const authScreenOptions = \{ headerBackButtonDisplayMode: 'minimal' \} as const;/);
+  const group = source.match(/<Stack\.Group screenOptions=\{authScreenOptions\}>([\s\S]*?)<\/Stack\.Group>/);
+  assert.ok(group, 'auth screens are wrapped in a group with authScreenOptions');
+  for (const name of ['SignIn', 'SignUp', 'VerifyCode', 'ForgotPassword', 'SetNewPassword']) {
+    assert.match(group[1], new RegExp(`name="${name}"`), name);
+  }
 });
 
 test('sign in: the button keeps its role and state; links keep the link role', () => {
@@ -94,6 +119,8 @@ test('sign up: inline sign-in prompt replaces the old link, two password toggles
   assert.deepEqual(find(hosts, 'TextInput').map(input => input.props.accessibilityLabel),
     ['Email', 'Password (at least 8 characters)', 'Confirm password']);
   assert.equal(find(hosts, 'Pressable').filter(entry => entry.props.accessibilityLabel === 'Show password').length, 2);
+  assert.deepEqual(find(hosts, 'TextInput').map(input => input.props.placeholder),
+    ['name@college.edu', 'At least 8 characters', 'Re-enter your password']);
   assert.match(footerHtml('light', hosts), /Create account/);
   const signIn = pressableTitled(element, 'light', 'Sign in');
   assert.equal(signIn.props.accessibilityRole, 'link');

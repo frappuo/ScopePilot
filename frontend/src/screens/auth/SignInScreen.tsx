@@ -38,9 +38,9 @@ export default function SignInScreen({ navigation }: ScreenProps<'SignIn'>) {
     <BrandHeader />
     <ScreenHeading title="Welcome back" subtitle="Sign in to your microscopy logbook." />
     <FieldGroup>
-      <FieldRow label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false}
+      <FieldRow label="Email" placeholder="name@college.edu" value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false}
         autoComplete="email" keyboardType="email-address" textContentType="emailAddress" editable={!busy} />
-      <PasswordRow label="Password" value={password} onChangeText={setPassword} autoCapitalize="none"
+      <PasswordRow label="Password" placeholder="Your password" value={password} onChangeText={setPassword} autoCapitalize="none"
         autoComplete="current-password" textContentType="password" editable={!busy} onSubmitEditing={submit} />
     </FieldGroup>
     {state.notice && <Notice kind="info">{NOTICES[state.notice]}</Notice>}

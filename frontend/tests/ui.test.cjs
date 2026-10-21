@@ -45,6 +45,9 @@ function flatten(style) {
 
 const find = (hosts, name) => hosts.filter(entry => entry.name === name);
 
+// The last Text host's string content.
+const textOfLast = hosts => { const texts = find(hosts, 'Text'); return texts[texts.length - 1].props.children; };
+
 // Every colour a host received, from its style or from a *Color / color prop.
 function coloursOf(hosts) {
   return hosts.flatMap(({ props }) => [
@@ -83,7 +86,7 @@ for (const scheme of ['light', 'dark']) {
       createElement(ui.FieldGroup, null,
         createElement(ui.FieldRow, { label: 'Email', value: '' }),
         createElement(ui.PasswordRow, { label: 'Password', value: '' })),
-      ...['eye', 'eyeOff', 'account'].map(glyph => createElement(ui.IconButton, { key: glyph, glyph, accessibilityLabel: glyph, onPress() {} })),
+      createElement(ui.IconButton, { glyph: 'account', accessibilityLabel: 'Account', onPress() {} }),
       createElement(ui.IconButton, { glyph: 'account', accessibilityLabel: 'Account', onPress() {}, busy: true }),
       createElement(ui.TextLink, { title: 'Link', onPress() {} }),
       createElement(ui.TextLink, { title: 'Action', onPress() {}, role: 'button', disabled: true, align: 'end' }),
@@ -128,11 +131,18 @@ for (const scheme of ['light', 'dark']) {
     assert.equal(flatten(find(hosts, 'Pressable')[0].props.style).minHeight, 44);
   });
 
-  test(`${scheme}: icon glyphs are muted`, () => {
-    for (const glyph of ['eye', 'eyeOff', 'account']) {
-      const { hosts } = render(scheme, createElement(ui.IconButton, { glyph, accessibilityLabel: glyph, onPress() {} }));
-      assert.deepEqual([...new Set(coloursOf(hosts))], [colors.textMuted], glyph);
-    }
+  test(`${scheme}: the account glyph is muted`, () => {
+    const { hosts } = render(scheme, createElement(ui.IconButton, { glyph: 'account', accessibilityLabel: 'Account', onPress() {} }));
+    assert.deepEqual([...new Set(coloursOf(hosts))], [colors.textMuted]);
+  });
+
+  test(`${scheme}: the password toggle is accent text, not a glyph`, () => {
+    const { hosts } = render(scheme, createElement(ui.PasswordRow, { label: 'Password', value: '', placeholder: 'Your password' }));
+    const texts = find(hosts, 'Text');
+    const toggleText = flatten(texts[texts.length - 1].props.style);
+    assert.equal(toggleText.color, colors.accent);
+    assert.equal(toggleText.fontWeight, '600');
+    assert.equal(find(hosts, 'TextInput')[0].props.placeholderTextColor, colors.textMuted);
   });
 
   test(`${scheme}: the large button is 54 tall with the button radius`, () => {
@@ -255,20 +265,22 @@ test('a regular button keeps today\'s size', () => {
 });
 
 test('passwordToggle labels follow the state', () => {
-  assert.deepEqual(ui.passwordToggle(false), { secureTextEntry: true, accessibilityLabel: 'Show password', glyph: 'eye' });
-  assert.deepEqual(ui.passwordToggle(true), { secureTextEntry: false, accessibilityLabel: 'Hide password', glyph: 'eyeOff' });
+  assert.deepEqual(ui.passwordToggle(false), { secureTextEntry: true, accessibilityLabel: 'Show password', title: 'Show' });
+  assert.deepEqual(ui.passwordToggle(true), { secureTextEntry: false, accessibilityLabel: 'Hide password', title: 'Hide' });
 });
 
-test('a password row starts hidden with a 44 pt "Show password" button', () => {
-  const { hosts } = render('light', createElement(ui.PasswordRow, { label: 'Password', secureTextEntry: false }));
+test('a password row starts hidden with a 44 pt "Show" text button', () => {
+  const { html, hosts } = render('light', createElement(ui.PasswordRow, { label: 'Password', secureTextEntry: false }));
   const input = find(hosts, 'TextInput')[0].props;
   assert.equal(input.secureTextEntry, true);
   assert.equal(input.accessibilityLabel, 'Password');
   const toggle = find(hosts, 'Pressable')[0].props;
   assert.equal(toggle.accessibilityRole, 'button');
   assert.equal(toggle.accessibilityLabel, 'Show password');
-  assert.equal(flatten(toggle.style).width, 44);
-  assert.equal(flatten(toggle.style).height, 44);
+  assert.equal(flatten(toggle.style).minWidth, 44);
+  assert.equal(flatten(toggle.style).minHeight, 44);
+  assert.equal(textOfLast(hosts), 'Show');
+  assert.doesNotMatch(html, /Hide/);
 });
 
 test('icon buttons report role, label and state', () => {

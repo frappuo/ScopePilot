@@ -31,11 +31,12 @@ export default function SignUpScreen({ navigation }: ScreenProps<'SignUp'>) {
     <ScreenHeading title="Create an account"
       subtitle={`We will email you a ${OTP_CODE_LENGTH}-digit code to confirm your address.`} />
     <FieldGroup>
-      <FieldRow label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false}
+      <FieldRow label="Email" placeholder="name@college.edu" value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false}
         autoComplete="email" keyboardType="email-address" textContentType="emailAddress" editable={!busy} />
-      <PasswordRow label={`Password (at least ${MIN_PASSWORD_LENGTH} characters)`} value={password} onChangeText={setPassword}
+      <PasswordRow label={`Password (at least ${MIN_PASSWORD_LENGTH} characters)`} placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
+        value={password} onChangeText={setPassword}
         autoCapitalize="none" autoComplete="new-password" textContentType="newPassword" editable={!busy} />
-      <PasswordRow label="Confirm password" value={confirm} onChangeText={setConfirm} autoCapitalize="none"
+      <PasswordRow label="Confirm password" placeholder="Re-enter your password" value={confirm} onChangeText={setConfirm} autoCapitalize="none"
         autoComplete="new-password" textContentType="newPassword" editable={!busy} onSubmitEditing={submit} />
     </FieldGroup>
     {error && <Notice kind="error">{error}</Notice>}
