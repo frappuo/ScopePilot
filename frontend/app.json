@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "plugins": [
       [
         "expo-image-picker",
@@ -15,7 +15,8 @@
           "photosPermission": "Select microscopy photos for educational analysis."
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-system-ui"
     ],
     "ios": {
       "supportsTablet": true
