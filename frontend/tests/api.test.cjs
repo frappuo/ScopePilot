@@ -1,32 +1,20 @@
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const Module = require('node:module');
-const ts = require('typescript');
+const { loadTs } = require('./helpers/loadTs.cjs');
 
 process.env.EXPO_PUBLIC_API_URL = 'http://localhost:8000/';
 let nativeUpload;
 const nativeFileUris = [];
-const originalLoad = Module._load;
-Module._load = function (request, parent, isMain) {
-  if (request === 'expo-file-system') {
-    return {
-      File: class {
-        constructor(uri) { nativeFileUris.push(uri); }
-        upload(endpoint, options) { return nativeUpload(endpoint, options); }
-      },
-      UploadType: { MULTIPART: 1 },
-    };
-  }
-  return originalLoad.call(this, request, parent, isMain);
-};
-const compiled = ts.transpileModule(fs.readFileSync('src/services/api.ts', 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const loaded = new Module('api-test');
-loaded._compile(compiled, 'api-test.cjs');
-Module._load = originalLoad;
-const { analyzeImage, askQuestion, generateQuiz, sanitizeAnswer } = loaded.exports;
+// loadTs follows the relative import of src/api/config.ts; only expo-file-system is stubbed.
+const { analyzeImage, askQuestion, generateQuiz, sanitizeAnswer } = loadTs('src/services/api.ts', {
+  'expo-file-system': {
+    File: class {
+      constructor(uri) { nativeFileUris.push(uri); }
+      upload(endpoint, options) { return nativeUpload(endpoint, options); }
+    },
+    UploadType: { MULTIPART: 1 },
+  },
+});
 const originalFetch = global.fetch;
 afterEach(() => {
   global.fetch = originalFetch;

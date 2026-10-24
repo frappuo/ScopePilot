@@ -27,6 +27,7 @@ type AuthContextValue = {
   setNewPassword(password: string): Promise<AuthResult>;
   cancelRecovery(): Promise<void>;
   signOut(): Promise<void>;
+  endSession(): Promise<void>;
   clearNotice(): void;
   getAccessToken(forceRefresh?: boolean): Promise<AccessTokenResult>;
 };
@@ -179,6 +180,17 @@ export function AuthProvider({ config, children }: { config: SupabaseConfig; chi
 
   const cancelRecovery = signOut;
 
+  // For a session the backend no longer accepts. Unlike signOut it does not mark the sign-out as
+  // requested, so the reducer shows the session_ended notice on the sign-in screen.
+  const endSession = useCallback(async (): Promise<void> => {
+    const auth = clientRef.current?.auth;
+    if (!auth) return;
+    try {
+      const { error } = await auth.signOut({ scope: 'local' });
+      if (error) describeAuthError(error, 'end_session');
+    } catch (error) { describeAuthError(error, 'end_session'); }
+  }, []);
+
   const clearNotice = useCallback(() => dispatch({ type: 'notice_cleared' }), []);
 
   const getAccessToken = useCallback(async (forceRefresh = false): Promise<AccessTokenResult> => {
@@ -203,9 +215,9 @@ export function AuthProvider({ config, children }: { config: SupabaseConfig; chi
 
   const value = useMemo<AuthContextValue>(() => ({
     state, clientError, signIn, signUp, verifySignUp, resendSignUp, requestPasswordReset,
-    verifyRecovery, setNewPassword, cancelRecovery, signOut, clearNotice, getAccessToken,
+    verifyRecovery, setNewPassword, cancelRecovery, signOut, endSession, clearNotice, getAccessToken,
   }), [state, clientError, signIn, signUp, verifySignUp, resendSignUp, requestPasswordReset,
-    verifyRecovery, setNewPassword, cancelRecovery, signOut, clearNotice, getAccessToken]);
+    verifyRecovery, setNewPassword, cancelRecovery, signOut, endSession, clearNotice, getAccessToken]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
