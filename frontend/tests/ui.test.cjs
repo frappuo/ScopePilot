@@ -17,8 +17,8 @@ function host(name) {
   };
 }
 const reactNative = {
-  ActivityIndicator: host('ActivityIndicator'), KeyboardAvoidingView: host('KeyboardAvoidingView'),
-  Pressable: host('Pressable'), ScrollView: host('ScrollView'), Text: host('Text'),
+  ActivityIndicator: host('ActivityIndicator'), Image: host('Image'), KeyboardAvoidingView: host('KeyboardAvoidingView'),
+  Pressable: host('Pressable'), RefreshControl: host('RefreshControl'), ScrollView: host('ScrollView'), Text: host('Text'),
   TextInput: host('TextInput'), View: host('View'),
   Platform: { OS: 'ios' },
   StyleSheet: { create: styles => styles, hairlineWidth: 1 },
@@ -93,10 +93,144 @@ for (const scheme of ['light', 'dark']) {
       createElement(ui.InlinePrompt, { prompt: 'New to ScopePilot?', linkTitle: 'Create an account', onPress() {} }),
       createElement(ui.EmptyState, { title: 'Empty', body: 'Nothing yet.' }),
       createElement(ui.Button, { title: 'Large', onPress() {}, size: 'large' }),
-      createElement(ui.Spacer)));
+      createElement(ui.Spacer),
+      createElement(ui.ListGroup, null,
+        createElement(ui.ListRow, { title: 'Onion epidermis', meta: 'Saved', leading: createElement(ui.ListThumbnail, { uri: 'https://example.test/t.jpg' }), onPress() {} }),
+        createElement(ui.ListRow, { title: 'Yeast', leading: createElement(ui.ListThumbnail, { uri: null }), onPress() {}, disabled: true })),
+      createElement(ui.StatRow, null, createElement(ui.StatTile, { count: 3, label: 'Saved' })),
+      createElement(ui.ChipRow, null, createElement(ui.Chip, { label: 'Cell wall' })),
+      ...['info', 'warning', 'neutral'].map(tone => createElement(ui.Pill, { key: tone, label: tone, tone })),
+      ...['chevron', 'more', 'warning'].map(glyph => createElement(ui.GlyphView, { key: glyph, glyph }))));
     const outside = coloursOf(hosts).filter(colour => !allowed.has(colour));
     assert.deepEqual(outside, []);
   });
+
+  test(`${scheme}: chevron and more glyphs are muted; the warning glyph uses the warning colour`, () => {
+    for (const glyph of ['chevron', 'more']) {
+      const { hosts } = render(scheme, createElement(ui.GlyphView, { glyph }));
+      assert.deepEqual([...new Set(coloursOf(hosts))], [colors.textMuted], glyph);
+    }
+    const { hosts } = render(scheme, createElement(ui.GlyphView, { glyph: 'warning' }));
+    assert.deepEqual([...new Set(coloursOf(hosts))], [colors.warning]);
+  });
+
+  test(`${scheme}: pills pair each tone with its soft background`, () => {
+    const expected = {
+      info: [colors.infoSoft, colors.info],
+      warning: [colors.warningSoft, colors.warning],
+      neutral: [colors.surfaceMuted, colors.textMuted],
+    };
+    for (const [tone, [background, text]] of Object.entries(expected)) {
+      const { hosts } = render(scheme, createElement(ui.Pill, { label: 'Tentative', tone }));
+      assert.equal(flatten(find(hosts, 'View')[0].props.style).backgroundColor, background, tone);
+      assert.equal(flatten(find(hosts, 'Text')[0].props.style).color, text, tone);
+    }
+  });
+
+  test(`${scheme}: chips are body text on the muted surface`, () => {
+    const { hosts } = render(scheme, createElement(ui.Chip, { label: 'Nucleus' }));
+    assert.equal(flatten(find(hosts, 'View')[0].props.style).backgroundColor, colors.surfaceMuted);
+    assert.equal(flatten(find(hosts, 'Text')[0].props.style).color, colors.text);
+  });
+
+  test(`${scheme}: the list group is a surface card with hairlines inset past the thumbnail`, () => {
+    const { hosts } = render(scheme, createElement(ui.ListGroup, null,
+      createElement(ui.ListRow, { title: 'A', onPress() {} }),
+      createElement(ui.ListRow, { title: 'B', onPress() {} }),
+      createElement(ui.ListRow, { title: 'C', onPress() {} })));
+    const group = flatten(find(hosts, 'View')[0].props.style);
+    assert.equal(group.backgroundColor, colors.surface);
+    assert.equal(group.borderRadius, themes[scheme].radius.card);
+    const separators = find(hosts, 'View').map(view => flatten(view.props.style)).filter(style => style.height === 1);
+    assert.equal(separators.length, 2);
+    assert.equal(separators[0].marginLeft, 16 + ui.LIST_THUMB_SIZE + 12);
+    assert.equal(separators[0].backgroundColor, colors.border);
+  });
+}
+
+test('a list row is one button labelled with its title and meta, with a hidden chevron', () => {
+  const { html, hosts } = render('light', createElement(ui.ListRow, { title: 'Onion epidermis', meta: '24 October · Saved', onPress() {} }));
+  const pressable = find(hosts, 'Pressable')[0].props;
+  assert.equal(pressable.accessibilityRole, 'button');
+  assert.equal(pressable.accessibilityLabel, 'Onion epidermis, 24 October · Saved');
+  assert.deepEqual(pressable.accessibilityState, { disabled: false });
+  assert.equal(flatten(pressable.style).minHeight, 64);
+  const [title, meta] = find(hosts, 'Text');
+  assert.equal(title.props.numberOfLines, 2);
+  assert.equal(flatten(meta.props.style).color, palettes.light.textMuted);
+  const glyph = find(hosts, 'View').find(view => view.props.importantForAccessibility === 'no-hide-descendants');
+  assert.equal(glyph.props.accessible, false);
+  assert.match(html, /Onion epidermis/);
+  const plain = render('light', createElement(ui.ListRow, { title: 'Yeast', onPress() {}, disabled: true }));
+  const plainProps = find(plain.hosts, 'Pressable')[0].props;
+  assert.equal(plainProps.accessibilityLabel, 'Yeast');
+  assert.deepEqual(plainProps.accessibilityState, { disabled: true });
+  assert.equal(find(plain.hosts, 'Text').length, 1);
+});
+
+test('a list thumbnail is a decorative image, or a neutral tile without one', () => {
+  const calls = [];
+  const image = render('light', createElement(ui.ListThumbnail, { uri: 'https://example.test/t.jpg', onError: () => calls.push('error') }));
+  const props = find(image.hosts, 'Image')[0].props;
+  assert.deepEqual(props.source, { uri: 'https://example.test/t.jpg' });
+  assert.equal(props.accessible, false);
+  assert.equal(flatten(props.style).width, ui.LIST_THUMB_SIZE);
+  props.onError();
+  assert.deepEqual(calls, ['error']);
+  const tile = render('light', createElement(ui.ListThumbnail, { uri: null }));
+  assert.equal(find(tile.hosts, 'Image').length, 0);
+  assert.equal(flatten(find(tile.hosts, 'View')[0].props.style).backgroundColor, palettes.light.surfaceMuted);
+});
+
+test('stat tiles show a whole count and its label, read as one element', () => {
+  const { html, hosts } = render('light', createElement(ui.StatTile, { count: 3, label: 'Saved' }));
+  const labelled = find(hosts, 'View').find(view => view.props.accessible === true);
+  assert.equal(labelled.props.accessibilityLabel, 'Saved: 3');
+  assert.deepEqual(find(hosts, 'Text').map(text => text.props.children), ['3', 'Saved']);
+  assert.doesNotMatch(html, /%/);
+  const odd = render('light', createElement(ui.StatTile, { count: 2.7, label: 'Drafts' }));
+  assert.equal(find(odd.hosts, 'Text')[0].props.children, '2');
+  const negative = render('light', createElement(ui.StatTile, { count: -1, label: 'Drafts' }));
+  assert.equal(find(negative.hosts, 'Text')[0].props.children, '0');
+  const capped = render('light', createElement(ui.StatTile, { count: 200, label: 'Saved', capped: true }));
+  assert.equal(find(capped.hosts, 'Text')[0].props.children, '200+');
+  assert.equal(find(capped.hosts, 'View').find(view => view.props.accessible === true).props.accessibilityLabel, 'Saved: 200+');
+});
+
+test('the screen passes its refresh control to the scroll view', () => {
+  const control = createElement(reactNative.RefreshControl, { refreshing: false, onRefresh() {} });
+  const { hosts } = render('light', createElement(ui.Screen, { refreshControl: control }, 'Content'));
+  assert.equal(find(hosts, 'ScrollView')[0].props.refreshControl, control);
+  const plain = render('light', createElement(ui.Screen, null, 'Content'));
+  assert.equal(find(plain.hosts, 'ScrollView')[0].props.refreshControl, undefined);
+});
+
+test('glyphs are hidden from assistive tech', () => {
+  for (const glyph of ['account', 'chevron', 'more', 'warning']) {
+    const view = find(render('light', createElement(ui.GlyphView, { glyph })).hosts, 'View')[0].props;
+    assert.equal(view.accessible, false, glyph);
+    assert.equal(view.importantForAccessibility, 'no-hide-descendants', glyph);
+    assert.equal(view.accessibilityElementsHidden, true, glyph);
+  }
+});
+
+test('the warning glyph text does not scale with the font size', () => {
+  const { hosts } = render('light', createElement(ui.GlyphView, { glyph: 'warning' }));
+  assert.equal(find(hosts, 'Text')[0].props.maxFontSizeMultiplier, 1);
+});
+
+test('chip rows wrap and pills keep their label', () => {
+  const row = render('light', createElement(ui.ChipRow, null, createElement(ui.Chip, { label: 'Cell wall' })));
+  assert.equal(flatten(find(row.hosts, 'View')[0].props.style).flexWrap, 'wrap');
+  const pill = render('light', createElement(ui.Pill, { label: 'Tentative', tone: 'info' }));
+  assert.match(pill.html, /Tentative/);
+  assert.equal(flatten(find(pill.hosts, 'View')[0].props.style).alignSelf, 'flex-start');
+});
+
+// Per-scheme checks for the auth primitives.
+for (const scheme of ['light', 'dark']) {
+  const colors = palettes[scheme];
+  const allowed = new Set(Object.values(colors));
 
   test(`${scheme}: the field group has a strong boundary and inset hairlines`, () => {
     const { hosts } = render(scheme, createElement(ui.FieldGroup, null,

@@ -1,5 +1,5 @@
-import { Children, Fragment, useRef, useState, type ReactNode } from 'react';
-import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type StyleProp, type TextInputProps, type TextProps, type ViewStyle } from 'react-native';
+import { Children, Fragment, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { ActivityIndicator, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type RefreshControlProps, type StyleProp, type TextInputProps, type TextProps, type ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../theme/ThemeProvider';
 import type { Theme, TypeVariant } from '../theme/tokens';
@@ -9,7 +9,11 @@ import type { Theme, TypeVariant } from '../theme/tokens';
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive';
 type NoticeKind = 'error' | 'info' | 'success' | 'warning';
 type TextTone = 'default' | 'muted' | 'accent' | 'danger';
-type Glyph = 'account';
+export type Glyph = 'account' | 'chevron' | 'more' | 'warning';
+type PillTone = 'info' | 'warning' | 'neutral';
+
+// Thumbnail edge in list rows; the row separators are inset to start after it.
+export const LIST_THUMB_SIZE = 44;
 
 function typeStyle(theme: Theme, variant: TypeVariant) {
   const { maxFontSizeMultiplier: _cap, ...style } = theme.type[variant];
@@ -87,6 +91,24 @@ export function makeUiStyles(theme: Theme) {
     emptyState: { alignItems: 'center' },
     centered: { textAlign: 'center' },
     spacer: { flex: 1, minHeight: spacing.xl },
+    chevron: { width: 9, height: 9, marginRight: 4, borderTopWidth: 2, borderRightWidth: 2, borderColor: colors.textMuted, transform: [{ rotate: '45deg' }] },
+    dots: { flexDirection: 'row', gap: 3 },
+    dot: { width: 4, height: 4, borderRadius: radius.pill, backgroundColor: colors.textMuted },
+    warningRing: { width: 20, height: 20, borderRadius: radius.pill, borderWidth: 2, borderColor: colors.warning, alignItems: 'center', justifyContent: 'center' },
+    warningMark: { fontSize: 12, lineHeight: 14, fontWeight: '700', color: colors.warning },
+    listGroup: { backgroundColor: colors.surface, borderRadius: radius.card, ...theme.elevation },
+    listSeparator: { height: StyleSheet.hairlineWidth, marginLeft: spacing.lg + LIST_THUMB_SIZE + spacing.md, backgroundColor: colors.border },
+    listRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 64, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+    listRowText: { flex: 1, gap: spacing.xxs },
+    thumb: { width: LIST_THUMB_SIZE, height: LIST_THUMB_SIZE, borderRadius: radius.sm, backgroundColor: colors.surfaceMuted },
+    statRow: { flexDirection: 'row', gap: spacing.sm },
+    statTile: { flex: 1, gap: spacing.xxs, padding: spacing.md },
+    chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs + spacing.xxs },
+    chip: { backgroundColor: colors.surfaceMuted, borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: spacing.xs },
+    pill: { alignSelf: 'flex-start', borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: spacing.xxs },
+    pillInfo: { backgroundColor: colors.infoSoft }, pillInfoText: { color: colors.info },
+    pillWarning: { backgroundColor: colors.warningSoft }, pillWarningText: { color: colors.warning },
+    pillNeutral: { backgroundColor: colors.surfaceMuted }, pillNeutralText: { color: colors.textMuted },
   });
 }
 
@@ -111,9 +133,10 @@ const NOTICE_TEXT: Record<NoticeKind, 'errorText' | 'infoText' | 'successText' |
 };
 
 // `footer` stays pinned below the scrolling content and rises with the keyboard; `fill` lets a
-// Spacer push the last content line to the bottom.
-export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, fill }: {
+// Spacer push the last content line to the bottom; `refreshControl` adds pull-to-refresh.
+export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, fill, refreshControl }: {
   children: ReactNode; edges?: ('top' | 'bottom' | 'left' | 'right')[]; footer?: ReactNode; fill?: boolean;
+  refreshControl?: ReactElement<RefreshControlProps>;
 }) {
   const [styles, theme] = useUiStyles();
   // KeyboardAvoidingView compares its own frame with the keyboard's window position, so it needs
@@ -124,7 +147,7 @@ export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, 
     <View ref={frame} style={styles.flex} onLayout={() => frame.current?.measureInWindow((_x, y) => setOffset(y))}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={offset} style={styles.flex}>
         <ScrollView contentContainerStyle={[styles.page, fill && styles.pageFill]} keyboardShouldPersistTaps="handled"
-          indicatorStyle={theme.scheme === 'dark' ? 'white' : 'default'}>
+          indicatorStyle={theme.scheme === 'dark' ? 'white' : 'default'} refreshControl={refreshControl}>
           {children}
         </ScrollView>
         {footer ? <View style={styles.footer}><View style={styles.footerInner}>{footer}</View></View> : null}
@@ -271,10 +294,16 @@ export function PasswordRow(props: TextInputProps & { label: string }) {
     </Pressable>} />;
 }
 
-function GlyphView({ glyph }: { glyph: Glyph }) {
+// Simple glyphs drawn with Views. They are decorative: whatever carries them supplies the label.
+export function GlyphView({ glyph }: { glyph: Glyph }) {
   const [styles] = useUiStyles();
-  return <View style={styles.glyph} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+  return <View style={styles.glyph} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
     {glyph === 'account' && <><View style={styles.head} /><View style={styles.shoulders} /></>}
+    {glyph === 'chevron' && <View style={styles.chevron} />}
+    {glyph === 'more' && <View style={styles.dots}><View style={styles.dot} /><View style={styles.dot} /><View style={styles.dot} /></View>}
+    {glyph === 'warning' && <View style={styles.warningRing}>
+      <Text maxFontSizeMultiplier={1} style={styles.warningMark}>!</Text>
+    </View>}
   </View>;
 }
 
@@ -324,4 +353,84 @@ export function EmptyState({ title, body }: { title: string; body: string }) {
 export function Spacer() {
   const [styles] = useUiStyles();
   return <View style={styles.spacer} />;
+}
+
+// One card for a set of ListRows; the hairlines start after the thumbnail.
+export function ListGroup({ children }: { children: ReactNode }) {
+  const [styles] = useUiStyles();
+  const rows = Children.toArray(children);
+  return <View style={styles.listGroup}>
+    {rows.map((row, index) => <Fragment key={index}>
+      {index > 0 && <View style={styles.listSeparator} />}
+      {row}
+    </Fragment>)}
+  </View>;
+}
+
+// A tappable row: optional leading thumbnail, a title, a muted meta line and a chevron.
+// Screen readers hear one button labelled with the title and the meta line.
+export function ListRow({ title, meta, leading, onPress, disabled }: {
+  title: string; meta?: string; leading?: ReactNode; onPress: () => void; disabled?: boolean;
+}) {
+  const [styles] = useUiStyles();
+  return <Pressable accessibilityRole="button" accessibilityLabel={meta ? `${title}, ${meta}` : title}
+    accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
+    style={({ pressed }) => [styles.listRow, (pressed || disabled) && styles.dim]}>
+    {leading}
+    <View style={styles.listRowText}>
+      <AppText variant="bodyLarge" numberOfLines={2}>{title}</AppText>
+      {meta ? <AppText variant="caption" numberOfLines={1}>{meta}</AppText> : null}
+    </View>
+    <GlyphView glyph="chevron" />
+  </Pressable>;
+}
+
+// A list thumbnail, or a neutral tile when there is no image or it fails to load. Decorative.
+export function ListThumbnail({ uri, onError }: { uri: string | null; onError?: () => void }) {
+  const [styles] = useUiStyles();
+  const [failed, setFailed] = useState(false);
+  if (!uri || failed) return <View style={styles.thumb} accessible={false} />;
+  return <Image source={{ uri }} style={styles.thumb} resizeMode="cover" accessible={false}
+    accessibilityIgnoresInvertColors onError={() => { setFailed(true); onError?.(); }} />;
+}
+
+export function StatRow({ children }: { children: ReactNode }) {
+  const [styles] = useUiStyles();
+  return <View style={styles.statRow}>{children}</View>;
+}
+
+// A count and its label. Counts only: the value is a whole number, never a score or percentage;
+// `capped` shows it as a lower bound ("200+").
+export function StatTile({ count, label, capped }: { count: number; label: string; capped?: boolean }) {
+  const [styles] = useUiStyles();
+  const shown = `${Math.max(0, Math.floor(count))}${capped ? '+' : ''}`;
+  return <Card style={styles.statTile}>
+    <View accessible accessibilityLabel={`${label}: ${shown}`}>
+      <AppText variant="headline">{shown}</AppText>
+      <AppText variant="caption">{label}</AppText>
+    </View>
+  </Card>;
+}
+
+export function ChipRow({ children }: { children: ReactNode }) {
+  const [styles] = useUiStyles();
+  return <View style={styles.chipRow}>{children}</View>;
+}
+
+export function Chip({ label }: { label: string }) {
+  const [styles] = useUiStyles();
+  return <View style={styles.chip}><AppText variant="caption" tone="default">{label}</AppText></View>;
+}
+
+const PILL: Record<PillTone, ['pillInfo' | 'pillWarning' | 'pillNeutral', 'pillInfoText' | 'pillWarningText' | 'pillNeutralText']> = {
+  info: ['pillInfo', 'pillInfoText'], warning: ['pillWarning', 'pillWarningText'], neutral: ['pillNeutral', 'pillNeutralText'],
+};
+
+// A short status label such as "Tentative"; the word carries the meaning, the colour only supports it.
+export function Pill({ label, tone = 'neutral' }: { label: string; tone?: PillTone }) {
+  const [styles] = useUiStyles();
+  const [box, text] = PILL[tone];
+  return <View style={[styles.pill, styles[box]]}>
+    <AppText variant="label" style={styles[text]}>{label}</AppText>
+  </View>;
 }

@@ -20,8 +20,8 @@ function host(name) {
 
 function reactNative(extra = {}) {
   return {
-    ActivityIndicator: host('ActivityIndicator'), KeyboardAvoidingView: host('KeyboardAvoidingView'),
-    Pressable: host('Pressable'), ScrollView: host('ScrollView'), Text: host('Text'),
+    ActivityIndicator: host('ActivityIndicator'), Image: host('Image'), KeyboardAvoidingView: host('KeyboardAvoidingView'),
+    Pressable: host('Pressable'), RefreshControl: host('RefreshControl'), ScrollView: host('ScrollView'), Text: host('Text'),
     TextInput: host('TextInput'), View: host('View'),
     Platform: { OS: 'ios' },
     StyleSheet: { create: styles => styles, hairlineWidth: 1 },
