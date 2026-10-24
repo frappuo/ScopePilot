@@ -25,8 +25,15 @@ The AI is assistive and tentative; the student remains responsible for verifying
 -   Optional Gemini model fallback on quota or model-not-found (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model.
 -   Request limits (body size, `/ask`/`/quiz` input caps, global daily Gemini cap) and an optional shared app token (`APP_TOKEN`; a deterrent, not authentication).
 -   Legacy switch (logbook PR 7): `LEGACY_API_ENABLED=false` answers `/analyze`, `/ask` and `/quiz` with 410 before any body is read (section 5). Default `true`; not yet flipped on Render.
--   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete, experiment-scoped follow-up questions and quiz, daily usage in `GET /v1/me`, account deletion with `DELETE /v1/me`; section 5). No login or logbook screens in the app yet.
+-   Student logbook backend under `/v1` (Supabase token verification, experiment create/read/list/edit/save/delete, experiment-scoped follow-up questions and quiz, daily usage in `GET /v1/me`, account deletion with `DELETE /v1/me`; section 5).
 -   Braintrust prompt-evaluation harness with four variants and deterministic scorers.
+
+### On branch `feat/app-login-logbook` (not merged; details in section 6)
+
+-   Stage 1: Supabase email and password accounts in the app, with sign-up and password recovery by 6-digit emailed code, sessions in SecureStore, a first-launch marker and native-stack navigation.
+-   Theme stage: `src/theme` design tokens ("Brightfield warm"), light/dark following the system, WCAG contrast tests.
+-   Composition stage: new layout primitives in `src/components/ui.tsx`; the auth screens and the Logbook placeholder are recomposed with them.
+-   Analysis now sits behind sign-in but still calls the legacy `/analyze`, `/ask` and `/quiz`. The app makes no `/v1` calls yet, and the Logbook screen is a placeholder.
 
 ### Verified on a physical device (user-reported)
 
@@ -50,9 +57,12 @@ Do not describe planned features as implemented.
 
 ### Planned / not implemented
 
-None of the following exists in the code. The logbook backend PRs (1-7) are done; remaining, in order:
+None of the following exists in the code. The logbook backend PRs (1-7) are done, and the app's sign-in is on `feat/app-login-logbook`; remaining, in order:
 
--   The app's login and logbook (experiments) screens (no login in the app today).
+-   Stage 2: logbook core in the app (create from an image, list, open, rename, save, delete through `/v1`). Fix the auth 5xx message first (Known issues).
+-   Stage 3: experiment ask, quiz and daily usage in the app.
+-   Stage 4: account deletion in the app (`DELETE /v1/me`).
+-   Removal of the legacy `AnalysisScreen` once the logbook replaces it; then update README.md and add a `frontend/.env.example`.
 -   Later assistant features: cross-experiment context, learning tracking.
 -   RAG over trusted biology material.
 
@@ -70,6 +80,10 @@ Also not implemented: per-user rate limiting on the legacy `/analyze`, `/ask` an
 -   `backend/.env.example` does not list `MAX_ENCODED_IMAGE_BYTES`.
 -   A "server busy" 503 shows the app's generic 503 message, not the backend detail.
 -   Real-device behavior of the decode lock and memory use on Render have not been measured.
+-   App auth (branch `feat/app-login-logbook`): a 5xx from Supabase Auth shows the network-error message. Fix this first in stage 2.
+-   Not verified on a device: the keyboard gap above the pinned footer on Face ID iPhones, the Android back button, the first-launch marker after a reinstall, session refresh after the access token expires, and the dark launch splash.
+-   Render returns 503 on `/v1` (`SUPABASE_URL` and `SUPABASE_SECRET_KEY` unset there), so the logbook stages can only be tried against a local backend for now.
+-   During development the phone reaches Metro only through a tunnel (`--tunnel`), not over the LAN.
 
 ## 3. Architecture
 
@@ -160,7 +174,7 @@ Steps are in README.md. iPhone camera JPEGs are detected by Pillow as `MPO` with
 
 ### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14 and PR 5 merged 2026-10-12 as #16, both live-verified locally; PR 6 account deletion live-verified locally 2026-10-14; PR 7 legacy switch done 2026-10-15, see "Legacy switch" above)
 
-Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. Only the backend part is done; the app's login and logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), answer questions and build quizzes from an experiment's stored analysis (PR 5), and delete the whole account (PR 6). The app's login and experiment screens do not exist yet.
+Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. The backend part is done; the app's login is on branch `feat/app-login-logbook` (section 6) and its logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), answer questions and build quizzes from an experiment's stored analysis (PR 5), and delete the whole account (PR 6). The app's login and experiment screens do not exist yet.
 
 -   `POST /v1/experiments` (multipart `image`): validates and cleans the upload with `prepare_image`, analyzes it with Gemini, and stores it as a draft that expires after `DRAFT_TTL_HOURS`. Stored with it: a metadata-free JPEG display copy (long edge at most 2048 px), a 256 px thumbnail, the model that answered and a hash of the production prompt (`PROMPT_VERSION`). Returns 201 with the experiment and short-lived signed image URLs.
     -   Order: draft cap (409), `prepare_image`, display copies, the per-user daily quota (`consume_gemini_call`, 429 with `Retry-After`), Gemini, the stored-analysis cap, uploads, insert. A rejected image or a failed display copy costs no quota. An analysis over the `StoredAnalysis` caps gives 502 "Gemini returned an invalid or empty analysis" and stores nothing; the quota unit stays spent.
@@ -273,6 +287,15 @@ Free-tier caveats (from Supabase docs, 2026-10-07): projects pause after 7 days 
 The app uploads the original picked file as multipart without converting or resizing it (`frontend/src/services/images.ts`; HEIC is rejected in the app). Error-message mapping is in README.md and `frontend/src/services/api.ts`. Last physical-iPhone check: 2026-10-03 against `https://scopepilot.onrender.com`.
 
 Lesson from an earlier config problem: a stale PowerShell `$env:EXPO_PUBLIC_API_URL` (`http://192.168.137.1:8000`) overrode `frontend/.env`. On a physical phone `localhost` is the phone; local testing needs a LAN address or tunnel, which the deployed HTTPS URL avoids.
+
+### App login and logbook (branch `feat/app-login-logbook`, not merged)
+
+-   Stage 1, auth: Supabase email and password (`src/auth/`). Sign-up and password recovery are confirmed with a 6-digit emailed code (`verifyOtp`; code length and OTP types in `src/auth/policy.ts`). The session is stored in SecureStore, split into chunks because a session exceeds one SecureStore value (`sessionStorage.ts`). A first-launch marker in the app's documents folder clears stored auth on the first launch after a reinstall, since iOS keeps Keychain items after uninstall (`firstLaunch.ts`). Native-stack navigation (`src/navigation/`): signed out shows only the auth screens (sign in, sign up, enter code, forgot password, new password); signed in shows the Logbook and Analysis screens.
+-   Theme stage: `src/theme` with design tokens ("Brightfield warm" palette, type, spacing, radius; `tokens.ts`), a `ThemeProvider` that follows the system light/dark setting, and a matching navigation theme. `expo-system-ui` sets the root background. WCAG AA contrast of every text pair is checked by `tests/theme.contrast.test.cjs`.
+-   Composition stage: new primitives in `src/components/ui.tsx`: `Screen` with a `footer` pinned above the keyboard (keyboard offset) and `fill`, `FieldGroup`/`FieldRow`/`PasswordRow`, `TextLink`, `InlinePrompt`, `IconButton`, `ScreenHeading`, `EmptyState`, `Spacer` and a large `Button` size. The auth screens and the Logbook placeholder are recomposed with them.
+-   The Logbook screen is a placeholder (empty state, "Analyze an image" button, sign-out). Analysis is unchanged apart from theming and still uses the legacy routes.
+-   Frontend tests: 216 (user-reported; mocked, no backend or Gemini). Run from `frontend/`: `npm.cmd run typecheck`, `npm.cmd test`, `npm.cmd run build`.
+-   Open items are under "Known issues / follow-up tasks" in section 2; next stages under "Planned / not implemented".
 
 ## 7. Prompting, guardrails, and security
 

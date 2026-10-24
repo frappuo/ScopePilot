@@ -3,6 +3,35 @@
 Dated log, newest first. Current status, planned features, and known issues
 live in `docs/HANDOFF.md`.
 
+## App login, theme and composition (branch `feat/app-login-logbook`, 2026-10-24)
+
+- Stage 1: Supabase email and password sign-in in the app; sign-up and
+  password recovery by 6-digit emailed code; sessions in SecureStore, split
+  into chunks; a first-launch marker clears stored auth after a reinstall;
+  native-stack navigation with separate signed-out and signed-in screens.
+- Theme stage: `src/theme` tokens ("Brightfield warm"), a `ThemeProvider` that
+  follows the system light/dark setting, a navigation theme, `expo-system-ui`,
+  and WCAG contrast tests.
+- Composition stage: new `ui.tsx` primitives (`Screen` with a pinned `footer`
+  and `fill` and a keyboard offset, `FieldGroup`/`FieldRow`/`PasswordRow`,
+  `TextLink`, `InlinePrompt`, `IconButton`, `ScreenHeading`, `EmptyState`,
+  `Spacer`, a large `Button`); the auth screens and the Logbook placeholder
+  are recomposed with them.
+- Analysis sits behind sign-in and still uses the legacy routes; no `/v1`
+  calls from the app yet.
+- Frontend tests: 216 (user-reported). Checks from `frontend/`:
+  `npm.cmd run typecheck`, `npm.cmd test`, `npm.cmd run build`.
+- Open:
+  - a Supabase Auth 5xx shows the network message (fix first in stage 2);
+  - not verified on a device: the keyboard gap on Face ID iPhones, Android
+    back, the reinstall marker, session refresh after token expiry, the dark
+    launch splash;
+  - Render returns 503 on `/v1` (Supabase variables unset there);
+  - the phone reaches Metro only through a tunnel.
+- Next: stage 2 logbook core, stage 3 ask/quiz/usage, stage 4 account
+  deletion, then remove the legacy `AnalysisScreen`, update README.md and add
+  `frontend/.env.example`.
+
 ## Logbook PR 7 legacy switch (2026-10-15)
 
 - `LEGACY_API_ENABLED` (default `true`). When `false`, `LegacyApiMiddleware`

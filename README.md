@@ -10,9 +10,11 @@ Implemented:
 - Expo TypeScript app: gallery image selection, analysis display, follow-up Q&A, and quiz.
 - Braintrust prompt-evaluation harness (`backend/evals/microscopy_eval.py`).
 
-The backend also has a student logbook API under `/v1` (sign-in with a Supabase access token, saved experiments, and follow-up questions and quizzes on a saved experiment), but the app has no accounts or logbook screens yet.
+The backend also has a student logbook API under `/v1` (sign-in with a Supabase access token, saved experiments, and follow-up questions and quizzes on a saved experiment).
 
-Not implemented: RAG, camera capture in the app, the app's login and logbook screens, and per-user rate limiting on the legacy routes (they can be switched off instead). Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
+On branch `feat/app-login-logbook` (not merged), the app has Supabase email and password accounts: sign-up and password recovery with a 6-digit emailed code, sessions in SecureStore, light/dark theming that follows the system, and a placeholder Logbook screen. Analysis sits behind sign-in but still uses the legacy `/analyze`, `/ask` and `/quiz`; the app makes no `/v1` calls yet. See [docs/HANDOFF.md](docs/HANDOFF.md) section 6.
+
+Not implemented: RAG, camera capture in the app, the app's logbook screens (the Logbook screen is a placeholder), and per-user rate limiting on the legacy routes (they can be switched off instead). Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
 
 ## Backend
 
