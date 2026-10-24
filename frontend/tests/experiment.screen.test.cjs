@@ -5,14 +5,22 @@ const { loadTs } = require('./helpers/loadTs.cjs');
 const { palettes, loadModule, render, find, flatten, coloursOf, textOf } = require('./helpers/screenHarness.cjs');
 
 const http = loadTs('src/api/http.ts', { 'expo-file-system': { File: class {}, UploadType: { MULTIPART: 1 } } });
+const changes = loadTs('src/api/logbookChanges.ts');
 const menuCalls = [];
+const alerts = [];
+const focusEffects = [];
 const module_ = loadModule('src/screens/ExperimentScreen.tsx', {
   '../api/http': http,
+  '../api/logbookChanges': changes,
   '../api/useLogbookApi': { useLogbookApi: () => ({ getExperiment: async () => new Promise(() => {}) }) },
   '../components/optionsMenu': { showOptionsMenu: (...args) => menuCalls.push(args) },
-});
+  '@react-navigation/native': { useFocusEffect: effect => { focusEffects.push(effect); } },
+}, { Alert: { alert: (...args) => alerts.push(args) } });
 const Experiment = module_.default;
-const { DetailView, draftNotice, imageErrorAction, toFailure, formatDetailDate } = module_;
+const {
+  DetailView, draftNotice, imageErrorAction, toFailure, formatDetailDate, menuActions, askToDelete, deleteObservation,
+  DELETE_TITLE, DELETE_BODY,
+} = module_;
 
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const analysis = {
@@ -173,12 +181,73 @@ test('toFailure keeps fixed messages only', () => {
   assert.deepEqual(toFailure(new Error('raw backend text')), { kind: 'failed', message: http.MESSAGES.failed });
 });
 
-test('the screen starts with a spinner and has no options button yet', () => {
-  const options = [];
+test('the screen starts with a spinner and registers a focus reload', () => {
+  focusEffects.length = 0;
   const { hosts } = render('light', createElement(Experiment, {
-    route: { params: { id: ID } }, navigation: { setOptions: value => options.push(value), goBack() {} },
+    route: { params: { id: ID } }, navigation: { setOptions() {}, goBack() {}, navigate() {} },
   }));
   assert.equal(find(hosts, 'ActivityIndicator').length, 1);
+  assert.equal(focusEffects.length, 1);
+  // Before the first load has finished, focusing does not reload.
+  assert.doesNotThrow(() => focusEffects[0]());
   assert.equal(menuCalls.length, 0);
   assert.match(formatDetailDate(draft.created_at), /2026/);
+});
+
+test('a draft has a Save to logbook footer; a saved observation does not', () => {
+  const { element, calls } = view({ onSave: () => calls.push('save') });
+  const { hosts } = render('light', element);
+  const save = buttonWithText(hosts, 'Save to logbook');
+  assert.deepEqual(save.props.accessibilityState, { disabled: false, busy: false });
+  save.props.onPress();
+  assert.deepEqual(calls, ['save']);
+  const savedHosts = render('light', view({ experiment: saved, onSave() {} }).element).hosts;
+  assert.equal(buttonWithText(savedHosts, 'Save to logbook'), undefined);
+  const busyHosts = render('light', view({ onSave() {}, busy: true }).element).hosts;
+  assert.deepEqual(buttonWithText(busyHosts, 'Save to logbook').props.accessibilityState, { disabled: true, busy: false });
+});
+
+test('a failed delete is shown as an alert above the observation', () => {
+  const { hosts } = render('light', view({ experiment: saved, actionError: http.MESSAGES.unavailable }).element);
+  assert.ok(find(hosts, 'View').some(entry => entry.props.accessibilityRole === 'alert'));
+  assert.equal(texts(hosts)[0], http.MESSAGES.unavailable);
+});
+
+test('the menu offers Edit, then a destructive Delete', () => {
+  const pressed = [];
+  const actions = menuActions({ onEdit: () => pressed.push('edit'), onDelete: () => pressed.push('delete') });
+  assert.deepEqual(actions.map(({ label, destructive }) => [label, Boolean(destructive)]),
+    [['Edit title and notes', false], ['Delete', true]]);
+  actions[0].onPress();
+  actions[1].onPress();
+  assert.deepEqual(pressed, ['edit', 'delete']);
+});
+
+test('delete asks first, with Cancel and a destructive Delete', () => {
+  alerts.length = 0;
+  let confirmed = 0;
+  askToDelete(() => { confirmed += 1; });
+  assert.equal(confirmed, 0);
+  const [title, body, buttons] = alerts[0];
+  assert.equal(title, DELETE_TITLE);
+  assert.equal(title, 'Delete this observation?');
+  assert.equal(body, DELETE_BODY);
+  assert.equal(body, "The image and analysis will be removed. This can't be undone.");
+  assert.deepEqual(buttons.map(({ text, style }) => [text, style]), [['Cancel', 'cancel'], ['Delete', 'destructive']]);
+  assert.equal(buttons[0].onPress, undefined);
+  buttons[1].onPress();
+  assert.equal(confirmed, 1);
+});
+
+test('a delete marks the logbook changed; a failure keeps the fixed message', async () => {
+  const before = Date.now();
+  const ids = [];
+  assert.deepEqual(await deleteObservation({ deleteExperiment: async id => { ids.push(id); } }, ID), { ok: true });
+  assert.deepEqual(ids, [ID]);
+  assert.equal(changes.logbookChangedSince(before), true);
+  const down = new http.ApiError('unavailable', 503, http.MESSAGES.unavailable);
+  assert.deepEqual(await deleteObservation({ deleteExperiment: async () => { throw down; } }, ID),
+    { ok: false, message: http.MESSAGES.unavailable });
+  assert.deepEqual(await deleteObservation({ deleteExperiment: async () => { throw new Error('raw'); } }, ID),
+    { ok: false, message: http.MESSAGES.failed });
 });

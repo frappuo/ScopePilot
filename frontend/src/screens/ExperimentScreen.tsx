@@ -1,5 +1,9 @@
+import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Alert } from 'react-native';
 import { ApiError, MESSAGES, type ApiErrorKind } from '../api/http';
+import { logbookChangedSince, noteLogbookChanged } from '../api/logbookChanges';
+import type { LogbookApi } from '../api/logbookApi';
 import { useLogbookApi } from '../api/useLogbookApi';
 import { showOptionsMenu, type MenuAction } from '../components/optionsMenu';
 import {
@@ -34,6 +38,35 @@ export function toFailure(caught: unknown): DetailFailure {
   return caught instanceof ApiError ? { kind: caught.kind, message: caught.message } : { kind: 'failed', message: MESSAGES.failed };
 }
 
+export const DELETE_TITLE = 'Delete this observation?';
+export const DELETE_BODY = "The image and analysis will be removed. This can't be undone.";
+
+export function menuActions({ onEdit, onDelete }: { onEdit(): void; onDelete(): void }): MenuAction[] {
+  return [
+    { label: 'Edit title and notes', onPress: onEdit },
+    { label: 'Delete', onPress: onDelete, destructive: true },
+  ];
+}
+
+// The destructive confirmation; nothing is deleted until Delete is pressed.
+export function askToDelete(onConfirm: () => void): void {
+  Alert.alert(DELETE_TITLE, DELETE_BODY, [
+    { text: 'Cancel', style: 'cancel' },
+    { text: 'Delete', style: 'destructive', onPress: onConfirm },
+  ]);
+}
+
+// A 404 counts as deleted (deleteExperiment treats it so). Either way the list reloads.
+export async function deleteObservation(api: Pick<LogbookApi, 'deleteExperiment'>, id: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    await api.deleteExperiment(id);
+    noteLogbookChanged();
+    return { ok: true };
+  } catch (caught) {
+    return { ok: false, message: caught instanceof ApiError ? caught.message : MESSAGES.failed };
+  }
+}
+
 function Lines({ items }: { items: string[] }) {
   if (!items.length) return <AppText tone="muted">None reported.</AppText>;
   return <>{items.map((item, index) => <AppText key={index}>{`• ${item}`}</AppText>)}</>;
@@ -45,12 +78,16 @@ export type DetailViewProps = {
   error: DetailFailure | null;
   // The image to show: null when there is none or it could not be loaded.
   imageUri: string | null;
+  // A failed delete, shown above the observation.
+  actionError?: string | null;
+  busy?: boolean;
   onImageError(): void;
   onRetry(): void;
   onBack(): void;
+  onSave?(): void;
 };
 
-export function DetailView({ experiment, loading, error, imageUri, onImageError, onRetry, onBack }: DetailViewProps) {
+export function DetailView({ experiment, loading, error, imageUri, actionError, busy, onImageError, onRetry, onBack, onSave }: DetailViewProps) {
   if (!experiment) {
     return <Screen fill>
       {loading && !error ? <Loading /> : null}
@@ -63,12 +100,14 @@ export function DetailView({ experiment, loading, error, imageUri, onImageError,
     </Screen>;
   }
   const { analysis } = experiment;
-  return <Screen>
+  const draft = experiment.status === 'draft';
+  return <Screen footer={draft && onSave ? <Button size="large" title="Save to logbook" onPress={onSave} disabled={busy} /> : undefined}>
+    {actionError ? <Notice kind="error">{actionError}</Notice> : null}
     {experiment.title ? <AppText accessibilityRole="header" variant="headline">{experiment.title}</AppText> : null}
     {/* Keyed by URI so a refetched URL loads afresh. */}
     <ImageFrame key={imageUri ?? 'none'} uri={imageUri} label={`Microscope image: ${analysis.probable_specimen}`}
       onError={onImageError} />
-    {experiment.status === 'draft' ? <Notice kind="info">{draftNotice(experiment)}</Notice> : null}
+    {draft ? <Notice kind="info">{draftNotice(experiment)}</Notice> : null}
     <Group>
       <AppText variant="label">Probable specimen</AppText>
       <AppText accessibilityRole="header" variant="title">{analysis.probable_specimen}</AppText>
@@ -98,10 +137,11 @@ export function DetailView({ experiment, loading, error, imageUri, onImageError,
   </Screen>;
 }
 
-// Edit and Delete join this menu with the edit screen; until then the menu has no actions and the
-// header shows no options button. Ask and quiz are not offered in this version.
-const MENU_ACTIONS: MenuAction[] = [];
+// initial: spinner and error screen. refresh: after an edit elsewhere; keeps what is shown on failure.
+// image: the refetch for fresh signed URLs, which only gives up on the image on failure.
+type LoadMode = 'initial' | 'refresh' | 'image';
 
+// Ask and quiz are not offered in this version.
 export default function ExperimentScreen({ navigation, route }: ScreenProps<'Experiment'>) {
   const { id } = route.params;
   const api = useLogbookApi();
@@ -109,46 +149,77 @@ export default function ExperimentScreen({ navigation, route }: ScreenProps<'Exp
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<DetailFailure | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const refetchedForImage = useRef(false);
+  const loadedAt = useRef(0);
   // Only the latest load may update the screen; unmounting invalidates any load still running.
   const latest = useRef(0);
-  useEffect(() => () => { latest.current += 1; }, []);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; latest.current += 1; };
+  }, []);
 
-  // quiet: the image refetch, which keeps the screen as it is and only gives up on the image.
-  const load = useCallback(async (quiet = false) => {
+  const load = useCallback(async (mode: LoadMode = 'initial') => {
     const request = ++latest.current;
-    if (!quiet) { setLoading(true); setError(null); }
+    if (mode === 'initial') { setLoading(true); setError(null); }
     try {
       const next = await api.getExperiment(id);
       if (request !== latest.current) return;
+      loadedAt.current = Date.now();
       setExperiment(next);
+      // Fresh signed URLs: let the image try again.
+      if (mode === 'refresh') { setImageFailed(false); refetchedForImage.current = false; }
     } catch (caught) {
       if (request !== latest.current) return;
-      if (quiet) setImageFailed(true);
-      else setError(toFailure(caught));
+      if (mode === 'image') setImageFailed(true);
+      else if (mode === 'initial') setError(toFailure(caught));
     } finally {
       if (request === latest.current) setLoading(false);
     }
   }, [api, id]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load('initial'); }, [load]);
+
+  // Back from the edit screen: show the saved values.
+  useFocusEffect(useCallback(() => {
+    if (loadedAt.current && logbookChangedSince(loadedAt.current)) void load('refresh');
+  }, [load]));
+
+  const confirmDelete = useCallback(() => {
+    askToDelete(async () => {
+      setDeleting(true);
+      setActionError(null);
+      const outcome = await deleteObservation(api, id);
+      if (!mounted.current) return;
+      setDeleting(false);
+      if (outcome.ok) navigation.goBack();
+      else setActionError(outcome.message);
+    });
+  }, [api, id, navigation]);
 
   useLayoutEffect(() => {
+    const actions = menuActions({
+      onEdit: () => navigation.navigate('EditExperiment', { id }),
+      onDelete: confirmDelete,
+    });
     navigation.setOptions({
       headerTitle: experiment ? formatDetailDate(experiment.created_at) : '',
-      headerRight: MENU_ACTIONS.length
-        ? () => <IconButton glyph="more" accessibilityLabel="More options" onPress={() => showOptionsMenu(MENU_ACTIONS)} />
+      headerRight: experiment
+        ? () => <IconButton glyph="more" accessibilityLabel="More options" busy={deleting} onPress={() => showOptionsMenu(actions)} />
         : undefined,
     });
-  }, [navigation, experiment]);
+  }, [navigation, experiment, id, deleting, confirmDelete]);
 
   const onImageError = useCallback(() => {
     if (imageErrorAction(refetchedForImage.current) === 'give_up') { setImageFailed(true); return; }
     refetchedForImage.current = true;
-    void load(true);
+    void load('image');
   }, [load]);
 
-  return <DetailView experiment={experiment} loading={loading} error={error}
+  return <DetailView experiment={experiment} loading={loading} error={error} actionError={actionError} busy={deleting}
     imageUri={imageFailed ? null : experiment?.image_url ?? null} onImageError={onImageError}
-    onRetry={() => { void load(); }} onBack={() => navigation.goBack()} />;
+    onRetry={() => { void load('initial'); }} onBack={() => navigation.goBack()}
+    onSave={() => navigation.navigate('EditExperiment', { id, save: true })} />;
 }

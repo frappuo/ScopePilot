@@ -13,6 +13,8 @@ export type RootStackParamList = {
   NewExperiment: undefined;
   // One observation, by ID.
   Experiment: { id: string };
+  // Title and notes; save: also save the draft to the logbook.
+  EditExperiment: { id: string; save?: boolean };
   // The pre-logbook analysis screen, removed once the logbook screens replace it.
   Analysis: undefined;
 };
