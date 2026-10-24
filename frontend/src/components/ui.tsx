@@ -69,6 +69,7 @@ export function makeUiStyles(theme: Theme) {
     brandArm: { width: 12, height: 2, borderRadius: 1, marginTop: 2, backgroundColor: colors.accent },
     wordmark: { fontWeight: '600' },
     heading: { gap: spacing.xs },
+    headingRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm },
     fieldGroup: { backgroundColor: colors.surface, borderColor: colors.borderStrong, borderWidth: 1, borderRadius: radius.card, overflow: 'hidden' },
     separator: { height: StyleSheet.hairlineWidth, marginLeft: spacing.lg, backgroundColor: colors.border },
     fieldRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
@@ -212,12 +213,14 @@ export function BrandHeader() {
   </View>;
 }
 
-export function ScreenHeading({ title, subtitle }: { title: string; subtitle?: ReactNode }) {
+// `trailing` (for example an IconButton) sits top-right, beside the title.
+export function ScreenHeading({ title, subtitle, trailing }: { title: string; subtitle?: ReactNode; trailing?: ReactNode }) {
   const [styles] = useUiStyles();
-  return <View style={styles.heading}>
+  const heading = <View style={[styles.heading, trailing ? styles.flex : null]}>
     <AppText accessibilityRole="header" variant="display">{title}</AppText>
     {subtitle ? <AppText tone="muted">{subtitle}</AppText> : null}
   </View>;
+  return trailing ? <View style={styles.headingRow}>{heading}{trailing}</View> : heading;
 }
 
 // One card for a set of FieldRows, with an inset hairline between rows.

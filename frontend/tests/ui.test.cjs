@@ -377,6 +377,18 @@ test('the keyboard offset starts at 0 and is measured on layout', () => {
   assert.doesNotThrow(() => wrapper.onLayout({}));
 });
 
+test('a screen heading with a trailing element puts it beside the title', () => {
+  const { html, hosts } = render('light', createElement(ui.ScreenHeading, {
+    title: 'Logbook', trailing: createElement(ui.IconButton, { glyph: 'account', accessibilityLabel: 'Account', onPress() {} }),
+  }));
+  assert.equal(flatten(find(hosts, 'View')[0].props.style).flexDirection, 'row');
+  assert.equal(flatten(find(hosts, 'View')[1].props.style).flex, 1);
+  assert.equal(find(hosts, 'Pressable')[0].props.accessibilityLabel, 'Account');
+  assert.match(html, /Logbook/);
+  const plain = render('light', createElement(ui.ScreenHeading, { title: 'Welcome back' }));
+  assert.equal(flatten(find(plain.hosts, 'View')[0].props.style).flexDirection, undefined);
+});
+
 test('dark mode uses the dark keyboard and scroll indicator', () => {
   const field = render('dark', createElement(ui.Field, { label: 'Email' }));
   assert.equal(find(field.hosts, 'TextInput')[0].props.keyboardAppearance, 'dark');

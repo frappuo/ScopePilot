@@ -43,7 +43,7 @@ export default function RootNavigator() {
         <Stack.Screen name="SetNewPassword" component={SetNewPasswordScreen}
           options={{ title: 'New password', headerTitle: '', headerBackVisible: false, gestureEnabled: false }} />
       </Stack.Group> : <>
-        <Stack.Screen name="Experiments" component={ExperimentsScreen} options={{ title: 'ScopePilot' }} />
+        <Stack.Screen name="Experiments" component={ExperimentsScreen} options={{ title: 'ScopePilot', headerShown: false }} />
         <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analyze an image' }} />
       </>}
     </Stack.Navigator>
