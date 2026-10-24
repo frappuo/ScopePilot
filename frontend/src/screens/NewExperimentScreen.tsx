@@ -8,8 +8,9 @@ import type { ScreenProps } from '../navigation/types';
 import { selectImage } from '../services/images';
 import type { SelectedImage } from '../types/analysis';
 import type { DailyUsage } from '../types/experiment';
+import { DISCLAIMER } from './copy';
 
-export const DISCLAIMER = 'Educational use only. Not a medical diagnosis.';
+export { DISCLAIMER };
 
 export function formatResetTime(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -112,8 +113,8 @@ export default function NewExperimentScreen({ navigation }: ScreenProps<'NewExpe
     setError(null);
     const outcome = await createObservation(api, image);
     if (!mounted.current) return;
-    // The draft shows in the list; the detail screen replaces this step once it exists.
-    if (outcome.ok) { navigation.goBack(); return; }
+    // Replace this step with the new draft, so back returns to the list.
+    if (outcome.ok) { navigation.replace('Experiment', { id: outcome.id }); return; }
     setError(outcome.message);
     setPhase('idle');
     void refreshUsage();

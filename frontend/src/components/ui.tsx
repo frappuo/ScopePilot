@@ -32,6 +32,7 @@ export function makeUiStyles(theme: Theme) {
     footerInner: { width: '100%', maxWidth: layout.maxWidth, alignSelf: 'center', paddingHorizontal: spacing.xl, paddingTop: spacing.md, paddingBottom: spacing.lg },
     card: { backgroundColor: colors.surface, borderRadius: radius.card, padding: spacing.lg, gap: spacing.sm, ...theme.elevation },
     cardMuted: { backgroundColor: colors.surfaceMuted, borderRadius: radius.card, padding: spacing.lg, gap: spacing.sm },
+    cardWarning: { backgroundColor: colors.warningSoft, borderRadius: radius.card, padding: spacing.lg, gap: spacing.sm },
     display: typeStyle(theme, 'display'),
     title: { ...typeStyle(theme, 'title'), marginTop: spacing.sm },
     headline: typeStyle(theme, 'headline'),
@@ -111,6 +112,10 @@ export function makeUiStyles(theme: Theme) {
     pillNeutral: { backgroundColor: colors.surfaceMuted }, pillNeutralText: { color: colors.textMuted },
     imageFrame: { width: '100%', aspectRatio: 4 / 3, backgroundColor: colors.surfaceMuted, borderRadius: radius.card, overflow: 'hidden' },
     imageFill: { width: '100%', height: '100%' },
+    imageEmpty: { alignItems: 'center', justifyContent: 'center' },
+    group: { gap: spacing.xs },
+    sectionLabel: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+    sectionLabelWarning: { color: colors.warning },
   });
 }
 
@@ -158,9 +163,11 @@ export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, 
   </SafeAreaView>;
 }
 
-export function Card({ children, tone = 'surface', style }: { children: ReactNode; tone?: 'surface' | 'muted'; style?: StyleProp<ViewStyle> }) {
+const CARD = { surface: 'card', muted: 'cardMuted', warning: 'cardWarning' } as const;
+
+export function Card({ children, tone = 'surface', style }: { children: ReactNode; tone?: keyof typeof CARD; style?: StyleProp<ViewStyle> }) {
   const [styles] = useUiStyles();
-  return <View style={[tone === 'surface' ? styles.card : styles.cardMuted, style]}>{children}</View>;
+  return <View style={[styles[CARD[tone]], style]}>{children}</View>;
 }
 
 export function AppText({ variant = 'body', tone, style, ...props }: TextProps & { variant?: TypeVariant; tone?: TextTone }) {
@@ -396,12 +403,34 @@ export function ListThumbnail({ uri, onError }: { uri: string | null; onError?: 
     accessibilityIgnoresInvertColors onError={() => { setFailed(true); onError?.(); }} />;
 }
 
-// A 4:3 frame on the muted surface showing the whole image (contain). `label` is what screen readers hear.
-export function ImageFrame({ uri, label, onError }: { uri: string; label: string; onError?: () => void }) {
+// A 4:3 frame on the muted surface showing the whole image (contain). `label` is what screen readers
+// hear. Without a URI the frame says "Image unavailable".
+export function ImageFrame({ uri, label, onError }: { uri: string | null; label: string; onError?: () => void }) {
   const [styles] = useUiStyles();
+  if (!uri) {
+    return <View style={[styles.imageFrame, styles.imageEmpty]}>
+      <AppText tone="muted">Image unavailable</AppText>
+    </View>;
+  }
   return <View style={styles.imageFrame}>
     <Image source={{ uri }} style={styles.imageFill} resizeMode="contain" accessible accessibilityRole="image"
       accessibilityLabel={label} accessibilityIgnoresInvertColors onError={onError} />
+  </View>;
+}
+
+// Keeps closely related lines together (a label and its value) inside the page's wider spacing.
+export function Group({ children }: { children: ReactNode }) {
+  const [styles] = useUiStyles();
+  return <View style={styles.group}>{children}</View>;
+}
+
+// A small section header inside a card, optionally with a glyph. The words carry the meaning;
+// the glyph and the warning colour only support them.
+export function SectionLabel({ title, glyph, tone = 'default' }: { title: string; glyph?: Glyph; tone?: 'default' | 'warning' }) {
+  const [styles] = useUiStyles();
+  return <View style={styles.sectionLabel}>
+    {glyph ? <GlyphView glyph={glyph} /> : null}
+    <AppText accessibilityRole="header" variant="label" style={tone === 'warning' ? styles.sectionLabelWarning : undefined}>{title}</AppText>
   </View>;
 }
 

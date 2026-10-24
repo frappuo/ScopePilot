@@ -6,6 +6,7 @@ import { gateFor } from '../auth/authState';
 import { Loading } from '../components/ui';
 import AnalysisScreen from '../screens/AnalysisScreen';
 import ConfigErrorScreen from '../screens/ConfigErrorScreen';
+import ExperimentScreen from '../screens/ExperimentScreen';
 import ExperimentsScreen from '../screens/ExperimentsScreen';
 import NewExperimentScreen from '../screens/NewExperimentScreen';
 import ForgotPasswordScreen from '../screens/auth/ForgotPasswordScreen';
@@ -47,6 +48,9 @@ export default function RootNavigator() {
         <Stack.Screen name="Experiments" component={ExperimentsScreen} options={{ title: 'ScopePilot', headerShown: false }} />
         <Stack.Screen name="NewExperiment" component={NewExperimentScreen}
           options={{ title: 'New observation', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        {/* The screen sets its header title to the observation's date. */}
+        <Stack.Screen name="Experiment" component={ExperimentScreen}
+          options={{ title: 'Observation', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
         <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analyze an image' }} />
       </>}
     </Stack.Navigator>
