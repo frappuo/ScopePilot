@@ -4,7 +4,7 @@ const { AuthApiError, AuthRetryableFetchError } = require('@supabase/supabase-js
 const { loadTs } = require('./helpers/loadTs.cjs');
 
 // Uses the installed supabase-js error classes, so the checks match the real client.
-const { describeAuthError, NETWORK_MESSAGE, GENERIC_MESSAGE } = loadTs('src/auth/authErrors.ts');
+const { describeAuthError, NETWORK_MESSAGE, SERVER_MESSAGE, GENERIC_MESSAGE } = loadTs('src/auth/authErrors.ts');
 const EMAIL = 'student@example.com';
 
 test('known codes map to fixed messages, never the Supabase text', () => {
@@ -26,6 +26,28 @@ for (const code of ['otp_expired', 'over_email_send_rate_limit', 'over_request_r
 test('network failures get the connection message', () => {
   assert.deepEqual(describeAuthError(new AuthRetryableFetchError('fetch failed', 0), 'sign_in'),
     { code: 'network', message: NETWORK_MESSAGE });
+});
+
+// supabase-js reports 500-504 as AuthRetryableFetchError with the status, so the class alone
+// cannot tell a server error from a lost connection.
+for (const status of [500, 503]) {
+  test(`a retryable ${status} gets the server message, not the connection message`, () => {
+    const result = describeAuthError(new AuthRetryableFetchError(`Error sending email to ${EMAIL}`, status), 'sign_up');
+    assert.deepEqual(result, { code: 'server', message: SERVER_MESSAGE });
+    assert.equal(result.message.includes(EMAIL), false);
+  });
+}
+
+test('an API error of 500 or more gets the server message even with a known code', () => {
+  assert.deepEqual(describeAuthError(new AuthApiError('server text', 500, 'unexpected_failure'), 'sign_up'),
+    { code: 'server', message: SERVER_MESSAGE });
+  assert.deepEqual(describeAuthError(new AuthApiError('server text', 505, 'over_request_rate_limit'), 'sign_in'),
+    { code: 'server', message: SERVER_MESSAGE });
+});
+
+test('client errors below 500 keep their own messages', () => {
+  assert.equal(describeAuthError(new AuthApiError('x', 429, 'over_request_rate_limit'), 'sign_in').code,
+    'over_request_rate_limit');
 });
 
 test('unknown codes and non-auth errors fall back and log only a category in development', async (context) => {

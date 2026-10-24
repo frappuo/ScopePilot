@@ -21,6 +21,7 @@ const MESSAGES: Record<string, string> = {
 };
 
 export const NETWORK_MESSAGE = "Can't reach the sign-in service. Check your connection and try again.";
+export const SERVER_MESSAGE = 'The sign-in service is having a problem. Please try again in a few minutes.';
 export const GENERIC_MESSAGE = 'Something went wrong. Please try again.';
 
 export type AuthFailure = { code: string | null; message: string };
@@ -30,6 +31,10 @@ function diagnostic(category: string, action: string) {
 }
 
 export function describeAuthError(error: unknown, action: string): AuthFailure {
+  // Keyed on status, not class: AuthRetryableFetchError carries 0 when no response arrived and
+  // 500-530 when Supabase answered with a server error (an SMTP failure is a 500, for example).
+  const status = isAuthError(error) && typeof error.status === 'number' ? error.status : 0;
+  if (status >= 500) return { code: 'server', message: SERVER_MESSAGE };
   if (isAuthRetryableFetchError(error)) return { code: 'network', message: NETWORK_MESSAGE };
   const code = isAuthError(error) && typeof error.code === 'string' ? error.code : null;
   if (code && Object.prototype.hasOwnProperty.call(MESSAGES, code)) return { code, message: MESSAGES[code] };
