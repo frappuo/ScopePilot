@@ -16,7 +16,8 @@ const module_ = loadModule('src/screens/ExperimentsScreen.tsx', {
   '@react-navigation/native': { useFocusEffect: effect => { focusEffects.push(effect); } },
 }, { Alert: { alert: (...args) => alerts.push(args) } });
 const Experiments = module_.default;
-const { LogbookView, loadLogbook, isStale, logbookCounts, entryTitle, entryMeta, STALE_AFTER_MS } = module_;
+const { LogbookView, loadLogbook, isStale, logbookCounts, entryTitle, entryMeta, withoutEntry, STALE_AFTER_MS } = module_;
+const actionsModule = loadModule('src/screens/observationActions.ts', { '../api/http': http }, { Alert: { alert: (...args) => alerts.push(args) } });
 
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const OTHER_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
@@ -43,6 +44,8 @@ function view(props = {}) {
     data: data(), loading: false, refreshing: false, error: null, busy: false,
     onRefresh: () => calls.push(['refresh']), onRetry: () => calls.push(['retry']),
     onOpen: id => calls.push(['open', id]), onNew: () => calls.push(['new']), onAccount: () => calls.push(['account']),
+    onOptions: item => calls.push(['options', item.id]), onEdit: id => calls.push(['edit', id]),
+    onDelete: id => calls.push(['delete', id]),
     ...props,
   });
   return { element, calls };
@@ -229,6 +232,67 @@ test('counts, titles and meta lines', () => {
   assert.equal(entryTitle({ ...draft, probable_specimen: ' ' }), 'Untitled observation');
   assert.match(entryMeta(saved), /24.* · Saved$/);
   assert.match(entryMeta(draft), / · Draft$/);
+});
+
+test('long-press opens the options for that entry; a tap still opens it', () => {
+  const { element, calls } = view();
+  const entries = rows(render('light', element).hosts);
+  entries[0].props.onLongPress();
+  entries[0].props.onPress();
+  assert.deepEqual(calls, [['options', ID], ['open', ID]]);
+});
+
+test('each entry offers Edit and Delete as screen-reader actions', () => {
+  const { element, calls } = view();
+  const entries = rows(render('light', element).hosts);
+  assert.deepEqual(entries[1].props.accessibilityActions,
+    [{ name: 'edit', label: 'Edit title and notes' }, { name: 'delete', label: 'Delete' }]);
+  entries[1].props.onAccessibilityAction({ nativeEvent: { actionName: 'edit' } });
+  entries[1].props.onAccessibilityAction({ nativeEvent: { actionName: 'delete' } });
+  assert.deepEqual(calls, [['edit', OTHER_ID], ['delete', OTHER_ID]]);
+});
+
+test('an entry being deleted is dimmed and inactive; the others are not', () => {
+  const entries = rows(render('light', view({ pendingIds: [OTHER_ID] }).element).hosts);
+  assert.deepEqual(entries.map(entry => entry.props.accessibilityState), [{ disabled: false }, { disabled: true }]);
+  assert.equal(flatten(entries[1].props.style).opacity, 0.5);
+  assert.equal(entries[1].props.disabled, true);
+});
+
+test('a deleted entry leaves at once and the tiles follow', () => {
+  const after = withoutEntry(data(), ID);
+  assert.deepEqual(after.items, [draft]);
+  assert.deepEqual(data().items, [saved, draft]);
+  const { hosts } = render('light', view({ data: after }).element);
+  assert.equal(rows(hosts).length, 1);
+  assert.deepEqual(tileLabels(hosts), ['Saved: 0', 'Drafts: 1', 'AI uses left today: 37']);
+});
+
+test('a failed delete keeps the row and shows the fixed message above the list', () => {
+  const { hosts } = render('light', view({ error: http.MESSAGES.unavailable }).element);
+  assert.equal(rows(hosts).length, 2);
+  assert.ok(find(hosts, 'View').some(entry => entry.props.accessibilityRole === 'alert'));
+  assert.ok(texts(hosts).includes(http.MESSAGES.unavailable));
+});
+
+test('the list uses the same menu, confirmation and copy as the detail screen', () => {
+  const pressed = [];
+  const menu = actionsModule.menuActions({ onEdit: () => pressed.push('edit'), onDelete: () => pressed.push('delete') });
+  const row = actionsModule.rowActions({ onEdit: () => pressed.push('edit'), onDelete: () => pressed.push('delete') });
+  assert.deepEqual(menu.map(action => action.label), row.map(action => action.label));
+  assert.equal(menu[1].destructive, true);
+  alerts.length = 0;
+  actionsModule.askToDelete(() => pressed.push('confirmed'));
+  assert.equal(alerts[0][0], 'Delete this observation?');
+  assert.equal(alerts[0][1], "The image and analysis will be removed. This can't be undone.");
+  alerts[0][2][1].onPress();
+  assert.deepEqual(pressed, ['confirmed']);
+});
+
+test('without action handlers rows have no long-press or actions', () => {
+  const entries = rows(render('light', view({ onOptions: undefined, onEdit: undefined, onDelete: undefined }).element).hosts);
+  assert.equal(entries[0].props.onLongPress, undefined);
+  assert.equal(entries[0].props.accessibilityActions, undefined);
 });
 
 test('formatLogbookDate shows the day of the month', () => {

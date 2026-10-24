@@ -6,6 +6,7 @@ import { logbookChangedSince } from '../api/logbookChanges';
 import type { LogbookApi } from '../api/logbookApi';
 import { useLogbookApi } from '../api/useLogbookApi';
 import { useAuth } from '../auth/AuthProvider';
+import { showOptionsMenu } from '../components/optionsMenu';
 import {
   Button, EmptyState, IconButton, ListGroup, ListRow, ListThumbnail, Loading, Notice, Screen, ScreenHeading,
   Spacer, StatRow, StatTile,
@@ -13,6 +14,7 @@ import {
 import type { ScreenProps } from '../navigation/types';
 import { useTheme } from '../theme/ThemeProvider';
 import type { DailyUsage, ExperimentSummary } from '../types/experiment';
+import { askToDelete, deleteObservation, menuActions, rowActions } from './observationActions';
 
 // Thumbnails are signed for 600 s (SIGNED_URL_SECONDS); refetch on focus a little before that.
 export const STALE_AFTER_MS = 8 * 60_000;
@@ -56,20 +58,34 @@ export function entryMeta(item: ExperimentSummary): string {
   return `${formatEntryDate(item.created_at)} · ${item.status === 'saved' ? 'Saved' : 'Draft'}`;
 }
 
+// The list without one entry, so a deleted row disappears before the reload; the tiles follow.
+export function withoutEntry(data: LogbookData, id: string): LogbookData {
+  return { ...data, items: data.items.filter(item => item.id !== id) };
+}
+
 export type LogbookViewProps = {
   data: LogbookData | null;
   loading: boolean;
   refreshing: boolean;
   error: string | null;
   busy: boolean;
+  // Entries being deleted: shown dimmed and inactive until the delete finishes.
+  pendingIds?: string[];
   onRefresh(): void;
   onRetry(): void;
   onOpen(id: string): void;
   onNew(): void;
   onAccount(): void;
+  // Long-press menu, and the screen-reader actions, for one entry.
+  onOptions?(item: ExperimentSummary): void;
+  onEdit?(id: string): void;
+  onDelete?(id: string): void;
 };
 
-export function LogbookView({ data, loading, refreshing, error, busy, onRefresh, onRetry, onOpen, onNew, onAccount }: LogbookViewProps) {
+export function LogbookView({
+  data, loading, refreshing, error, busy, pendingIds = [], onRefresh, onRetry, onOpen, onNew, onAccount,
+  onOptions, onEdit, onDelete,
+}: LogbookViewProps) {
   const { colors } = useTheme();
   const counts = data ? logbookCounts(data.items) : null;
   const capped = data ? !data.complete : false;
@@ -91,7 +107,12 @@ export function LogbookView({ data, loading, refreshing, error, busy, onRefresh,
       {data.items.length
         ? <ListGroup>
           {data.items.map(item => <ListRow key={item.id} title={entryTitle(item)} meta={entryMeta(item)}
-            leading={<ListThumbnail uri={item.thumb_url} />} onPress={() => onOpen(item.id)} />)}
+            leading={<ListThumbnail uri={item.thumb_url} />} onPress={() => onOpen(item.id)}
+            disabled={pendingIds.includes(item.id)}
+            onLongPress={onOptions ? () => onOptions(item) : undefined}
+            actions={onEdit && onDelete
+              ? rowActions({ onEdit: () => onEdit(item.id), onDelete: () => onDelete(item.id) })
+              : undefined} />)}
         </ListGroup>
         : <EmptyState title="No observations yet" body="Saved observations will appear here." />}
     </> : null}
@@ -109,11 +130,16 @@ export default function ExperimentsScreen({ navigation }: ScreenProps<'Experimen
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pendingIds, setPendingIds] = useState<string[]>([]);
   const dataRef = useRef<LogbookData | null>(null);
   dataRef.current = data;
   // Only the latest load may update the screen; unmounting invalidates any load still running.
   const latest = useRef(0);
-  useEffect(() => () => { latest.current += 1; }, []);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; latest.current += 1; };
+  }, []);
 
   const load = useCallback(async (mode: LoadMode) => {
     const request = ++latest.current;
@@ -158,8 +184,29 @@ export default function ExperimentsScreen({ navigation }: ScreenProps<'Experimen
     ]);
   }
 
+  const edit = (id: string) => navigation.navigate('EditExperiment', { id });
+
+  // The row stays, dimmed, while the delete runs. On success it goes at once and the list and tiles
+  // reload (a newer load also drops any older one still running); on failure it stays and the
+  // fixed message shows above the list.
+  async function runDelete(id: string) {
+    setPendingIds(ids => [...ids, id]);
+    setError(null);
+    const outcome = await deleteObservation(api, id);
+    if (!mounted.current) return;
+    setPendingIds(ids => ids.filter(pending => pending !== id));
+    if (!outcome.ok) { setError(outcome.message); return; }
+    setData(current => (current ? withoutEntry(current, id) : current));
+    void load('background');
+  }
+
+  const confirmDelete = (id: string) => askToDelete(() => { void runDelete(id); });
+
   return <LogbookView data={data} loading={loading} refreshing={refreshing} error={error} busy={busy}
+    pendingIds={pendingIds}
     onRefresh={() => { void load('refresh'); }} onRetry={() => { void load('initial'); }}
     onOpen={id => navigation.navigate('Experiment', { id })}
-    onNew={() => navigation.navigate('NewExperiment')} onAccount={openAccount} />;
+    onNew={() => navigation.navigate('NewExperiment')} onAccount={openAccount}
+    onOptions={item => showOptionsMenu(menuActions({ onEdit: () => edit(item.id), onDelete: () => confirmDelete(item.id) }), entryTitle(item))}
+    onEdit={edit} onDelete={confirmDelete} />;
 }

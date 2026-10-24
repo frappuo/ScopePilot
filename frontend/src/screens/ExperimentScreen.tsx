@@ -1,17 +1,19 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Alert } from 'react-native';
 import { ApiError, MESSAGES, type ApiErrorKind } from '../api/http';
-import { logbookChangedSince, noteLogbookChanged } from '../api/logbookChanges';
-import type { LogbookApi } from '../api/logbookApi';
+import { logbookChangedSince } from '../api/logbookChanges';
 import { useLogbookApi } from '../api/useLogbookApi';
-import { showOptionsMenu, type MenuAction } from '../components/optionsMenu';
+import { showOptionsMenu } from '../components/optionsMenu';
 import {
   AppText, Button, Card, Chip, ChipRow, Group, IconButton, ImageFrame, Loading, Notice, Pill, Screen, SectionLabel,
 } from '../components/ui';
 import type { ScreenProps } from '../navigation/types';
 import type { Experiment } from '../types/experiment';
 import { DISCLAIMER } from './copy';
+import { askToDelete, deleteObservation, menuActions } from './observationActions';
+
+// Shared with the logbook list; re-exported for existing callers and tests.
+export { askToDelete, deleteObservation, menuActions, DELETE_BODY, DELETE_TITLE } from './observationActions';
 
 export type DetailFailure = { kind: ApiErrorKind; message: string };
 
@@ -36,35 +38,6 @@ export function imageErrorAction(alreadyRefetched: boolean): 'refetch' | 'give_u
 
 export function toFailure(caught: unknown): DetailFailure {
   return caught instanceof ApiError ? { kind: caught.kind, message: caught.message } : { kind: 'failed', message: MESSAGES.failed };
-}
-
-export const DELETE_TITLE = 'Delete this observation?';
-export const DELETE_BODY = "The image and analysis will be removed. This can't be undone.";
-
-export function menuActions({ onEdit, onDelete }: { onEdit(): void; onDelete(): void }): MenuAction[] {
-  return [
-    { label: 'Edit title and notes', onPress: onEdit },
-    { label: 'Delete', onPress: onDelete, destructive: true },
-  ];
-}
-
-// The destructive confirmation; nothing is deleted until Delete is pressed.
-export function askToDelete(onConfirm: () => void): void {
-  Alert.alert(DELETE_TITLE, DELETE_BODY, [
-    { text: 'Cancel', style: 'cancel' },
-    { text: 'Delete', style: 'destructive', onPress: onConfirm },
-  ]);
-}
-
-// A 404 counts as deleted (deleteExperiment treats it so). Either way the list reloads.
-export async function deleteObservation(api: Pick<LogbookApi, 'deleteExperiment'>, id: string): Promise<{ ok: true } | { ok: false; message: string }> {
-  try {
-    await api.deleteExperiment(id);
-    noteLogbookChanged();
-    return { ok: true };
-  } catch (caught) {
-    return { ok: false, message: caught instanceof ApiError ? caught.message : MESSAGES.failed };
-  }
 }
 
 function Lines({ items }: { items: string[] }) {

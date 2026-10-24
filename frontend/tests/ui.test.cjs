@@ -168,6 +168,27 @@ test('a list row is one button labelled with its title and meta, with a hidden c
   assert.equal(find(plain.hosts, 'Text').length, 1);
 });
 
+test('a list row passes long-press and offers named actions to screen readers', () => {
+  const calls = [];
+  const { hosts } = render('light', createElement(ui.ListRow, {
+    title: 'Onion', meta: 'Saved', onPress: () => calls.push('open'), onLongPress: () => calls.push('long'),
+    actions: [{ name: 'edit', label: 'Edit title and notes', onPress: () => calls.push('edit') },
+      { name: 'delete', label: 'Delete', onPress: () => calls.push('delete') }],
+  }));
+  const row = find(hosts, 'Pressable')[0].props;
+  assert.deepEqual(row.accessibilityActions, [{ name: 'edit', label: 'Edit title and notes' }, { name: 'delete', label: 'Delete' }]);
+  row.onPress();
+  row.onLongPress();
+  row.onAccessibilityAction({ nativeEvent: { actionName: 'delete' } });
+  row.onAccessibilityAction({ nativeEvent: { actionName: 'edit' } });
+  row.onAccessibilityAction({ nativeEvent: { actionName: 'unknown' } });
+  assert.deepEqual(calls, ['open', 'long', 'delete', 'edit']);
+  const plain = find(render('light', createElement(ui.ListRow, { title: 'Yeast', onPress() {} })).hosts, 'Pressable')[0].props;
+  assert.equal(plain.accessibilityActions, undefined);
+  assert.equal(plain.onAccessibilityAction, undefined);
+  assert.equal(plain.onLongPress, undefined);
+});
+
 test('a list thumbnail is a decorative image, or a neutral tile without one', () => {
   const calls = [];
   const image = render('light', createElement(ui.ListThumbnail, { uri: 'https://example.test/t.jpg', onError: () => calls.push('error') }));

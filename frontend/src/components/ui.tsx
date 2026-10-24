@@ -376,14 +376,23 @@ export function ListGroup({ children }: { children: ReactNode }) {
   </View>;
 }
 
+// A named action screen readers offer on a row (VoiceOver's Actions rotor, TalkBack's actions menu).
+export type RowAction = { name: string; label: string; onPress(): void };
+
 // A tappable row: optional leading thumbnail, a title, a muted meta line and a chevron.
-// Screen readers hear one button labelled with the title and the meta line.
-export function ListRow({ title, meta, leading, onPress, disabled }: {
-  title: string; meta?: string; leading?: ReactNode; onPress: () => void; disabled?: boolean;
+// Screen readers hear one button labelled with the title and the meta line. `onLongPress` and
+// `actions` offer the same extra actions to touch and to screen-reader users.
+export function ListRow({ title, meta, leading, onPress, onLongPress, actions, disabled }: {
+  title: string; meta?: string; leading?: ReactNode; onPress: () => void; onLongPress?: () => void;
+  actions?: RowAction[]; disabled?: boolean;
 }) {
   const [styles] = useUiStyles();
   return <Pressable accessibilityRole="button" accessibilityLabel={meta ? `${title}, ${meta}` : title}
-    accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
+    accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress} onLongPress={onLongPress}
+    accessibilityActions={actions?.map(({ name, label }) => ({ name, label }))}
+    onAccessibilityAction={actions
+      ? event => actions.find(action => action.name === event.nativeEvent.actionName)?.onPress()
+      : undefined}
     style={({ pressed }) => [styles.listRow, (pressed || disabled) && styles.dim]}>
     {leading}
     <View style={styles.listRowText}>
