@@ -7,6 +7,7 @@ import { Loading } from '../components/ui';
 import AnalysisScreen from '../screens/AnalysisScreen';
 import ConfigErrorScreen from '../screens/ConfigErrorScreen';
 import ExperimentsScreen from '../screens/ExperimentsScreen';
+import NewExperimentScreen from '../screens/NewExperimentScreen';
 import ForgotPasswordScreen from '../screens/auth/ForgotPasswordScreen';
 import SetNewPasswordScreen from '../screens/auth/SetNewPasswordScreen';
 import SignInScreen from '../screens/auth/SignInScreen';
@@ -44,6 +45,8 @@ export default function RootNavigator() {
           options={{ title: 'New password', headerTitle: '', headerBackVisible: false, gestureEnabled: false }} />
       </Stack.Group> : <>
         <Stack.Screen name="Experiments" component={ExperimentsScreen} options={{ title: 'ScopePilot', headerShown: false }} />
+        <Stack.Screen name="NewExperiment" component={NewExperimentScreen}
+          options={{ title: 'New observation', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
         <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analyze an image' }} />
       </>}
     </Stack.Navigator>

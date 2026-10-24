@@ -1,49 +1,185 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createElement } = require('react');
+const { loadTs } = require('./helpers/loadTs.cjs');
 const { palettes, loadModule, render, find, flatten, coloursOf, textOf, footerHtml } = require('./helpers/screenHarness.cjs');
 
+const http = loadTs('src/api/http.ts', { 'expo-file-system': { File: class {}, UploadType: { MULTIPART: 1 } } });
 const signOutCalls = [];
 const alerts = [];
+const focusEffects = [];
+let fakeApi = {};
 const module_ = loadModule('src/screens/ExperimentsScreen.tsx', {
   '../auth/AuthProvider': { useAuth: () => ({ signOut: async () => { signOutCalls.push(true); } }) },
+  '../api/http': http,
+  '../api/useLogbookApi': { useLogbookApi: () => fakeApi },
+  '@react-navigation/native': { useFocusEffect: effect => { focusEffects.push(effect); } },
 }, { Alert: { alert: (...args) => alerts.push(args) } });
 const Experiments = module_.default;
+const { LogbookView, loadLogbook, isStale, logbookCounts, entryTitle, entryMeta, STALE_AFTER_MS } = module_;
+
+const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
+const OTHER_ID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+const saved = {
+  id: ID, status: 'saved', title: 'Onion peel', probable_specimen: 'Onion epidermis',
+  created_at: '2026-10-24T10:00:00Z', saved_at: '2026-10-24T10:05:00Z', expires_at: null,
+  thumb_url: 'https://storage.example.test/t.jpg?token=y',
+};
+const draft = {
+  id: OTHER_ID, status: 'draft', title: null, probable_specimen: 'Yeast cells',
+  created_at: '2026-10-23T09:00:00Z', saved_at: null, expires_at: '2026-10-24T09:00:00Z', thumb_url: null,
+};
+const usage = { used_today: 3, daily_limit: 40, remaining: 37, resets_at: '2026-10-25T00:00:00Z' };
+const data = (overrides = {}) => ({ items: [saved, draft], complete: true, usage, loadedAt: 0, ...overrides });
 
 function navigation() {
   const calls = [];
   return { calls, navigate: (...args) => calls.push(args) };
 }
 
+function view(props = {}) {
+  const calls = [];
+  const element = createElement(LogbookView, {
+    data: data(), loading: false, refreshing: false, error: null, busy: false,
+    onRefresh: () => calls.push(['refresh']), onRetry: () => calls.push(['retry']),
+    onOpen: id => calls.push(['open', id]), onNew: () => calls.push(['new']), onAccount: () => calls.push(['account']),
+    ...props,
+  });
+  return { element, calls };
+}
+
+const texts = hosts => find(hosts, 'Text').map(textOf);
+const tileLabels = hosts => find(hosts, 'View').filter(entry => entry.props.accessible === true).map(entry => entry.props.accessibilityLabel);
+const rows = hosts => find(hosts, 'Pressable').filter(entry => entry.props.accessibilityRole === 'button' && /·/.test(entry.props.accessibilityLabel ?? ''));
+
 for (const scheme of ['light', 'dark']) {
   const allowed = new Set(Object.values(palettes[scheme]));
-  test(`${scheme}: the logbook placeholder uses only palette colours`, () => {
-    const { hosts } = render(scheme, createElement(Experiments, { navigation: navigation() }));
-    assert.deepEqual(coloursOf(hosts).filter(colour => !allowed.has(colour)), []);
+  test(`${scheme}: every logbook state uses only palette colours`, () => {
+    const states = [
+      createElement(Experiments, { navigation: navigation() }),
+      view().element,
+      view({ data: data({ items: [] }) }).element,
+      view({ data: null, error: 'x' }).element,
+      view({ error: 'x' }).element,
+    ];
+    for (const element of states) {
+      const { hosts } = render(scheme, element);
+      assert.deepEqual(coloursOf(hosts).filter(colour => !allowed.has(colour)), []);
+    }
+  });
+
+  test(`${scheme}: pull-to-refresh uses the accent on the surface`, () => {
+    const { hosts } = render(scheme, view().element);
+    const control = find(hosts, 'ScrollView')[0].props.refreshControl.props;
+    assert.equal(control.tintColor, palettes[scheme].accent);
+    assert.deepEqual(control.colors, [palettes[scheme].accent]);
+    assert.equal(control.progressBackgroundColor, palettes[scheme].surface);
   });
 }
 
-test('the old notice and paragraph are gone; Logbook is the header with an empty state', () => {
-  const { html, hosts } = render('light', createElement(Experiments, { navigation: navigation() }));
-  assert.ok(!html.includes('You are signed in.'));
-  assert.ok(!html.includes('Saved experiments will appear here.'));
-  assert.ok(!html.includes('Your logbook'));
+test('before the first load the screen shows the header and a spinner, and loads on focus', async () => {
+  fakeApi = {
+    listAllExperiments: async () => { fakeApi.calls.push('list'); return { items: [], complete: true }; },
+    getMe: async () => { fakeApi.calls.push('me'); return { user_id: ID, usage }; },
+    calls: [],
+  };
+  focusEffects.length = 0;
+  const { hosts } = render('light', createElement(Experiments, { navigation: navigation() }));
   assert.deepEqual(find(hosts, 'Text').filter(text => text.props.accessibilityRole === 'header').map(textOf), ['Logbook']);
-  const texts = find(hosts, 'Text').map(textOf);
-  assert.ok(texts.includes('Your observations will appear here'));
-  assert.ok(texts.includes("Analyses aren't saved yet. You can still analyze an image below."));
-  assert.ok(texts.includes(module_.formatLogbookDate(new Date())));
+  assert.ok(texts(hosts).includes(module_.formatLogbookDate(new Date())));
+  assert.equal(find(hosts, 'ActivityIndicator').length, 1);
+  assert.equal(find(hosts, 'ScrollView')[0].props.refreshControl, undefined);
+  assert.equal(focusEffects.length, 1);
+  focusEffects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fakeApi.calls.sort(), ['list', 'me']);
 });
 
-test('Analyze an image is the footer button and opens Analysis', () => {
+test('tiles show counts only: saved, drafts and AI uses left today', () => {
+  const { html, hosts } = render('light', view().element);
+  assert.deepEqual(tileLabels(hosts), ['Saved: 1', 'Drafts: 1', 'AI uses left today: 37']);
+  assert.doesNotMatch(html, /%|confidence|accuracy|score/i);
+});
+
+test('without usage there are two tiles; an incomplete list shows lower bounds', () => {
+  const { hosts } = render('light', view({ data: data({ usage: null, complete: false }) }).element);
+  assert.deepEqual(tileLabels(hosts), ['Saved: 1+', 'Drafts: 1+']);
+});
+
+test('each entry is one labelled button with its title, date and status, opening by ID', () => {
+  const { element, calls } = view();
+  const { hosts } = render('light', element);
+  const entries = rows(hosts);
+  assert.equal(entries.length, 2);
+  assert.match(entries[0].props.accessibilityLabel, /^Onion peel, .+ · Saved$/);
+  assert.match(entries[1].props.accessibilityLabel, /^Yeast cells, .+ · Draft$/);
+  entries[1].props.onPress();
+  assert.deepEqual(calls, [['open', OTHER_ID]]);
+});
+
+test('an entry with a thumbnail shows it; one without shows a neutral tile', () => {
+  const { hosts } = render('light', view().element);
+  const images = find(hosts, 'Image');
+  assert.equal(images.length, 1);
+  assert.deepEqual(images[0].props.source, { uri: saved.thumb_url });
+  assert.equal(images[0].props.accessible, false);
+});
+
+test('an empty logbook shows the empty state and still the tiles', () => {
+  const { hosts } = render('light', view({ data: data({ items: [] }) }).element);
+  assert.ok(texts(hosts).includes('No observations yet'));
+  assert.ok(texts(hosts).includes('Saved observations will appear here.'));
+  assert.equal(rows(hosts).length, 0);
+  assert.deepEqual(tileLabels(hosts), ['Saved: 0', 'Drafts: 0', 'AI uses left today: 37']);
+});
+
+test('a failed first load shows the error as an alert and a retry button', () => {
+  const { element, calls } = view({ data: null, error: http.MESSAGES.notConfigured });
+  const { hosts } = render('light', element);
+  const notice = find(hosts, 'View').find(entry => entry.props.accessibilityRole === 'alert');
+  assert.ok(notice);
+  assert.ok(texts(hosts).includes(http.MESSAGES.notConfigured));
+  assert.equal(find(hosts, 'ActivityIndicator').length, 0);
+  const retry = find(hosts, 'Pressable').find(entry => find(render('light', entry.props.children).hosts, 'Text').some(t => textOf(t) === 'Try again'));
+  assert.ok(retry);
+  retry.props.onPress();
+  assert.deepEqual(calls, [['retry']]);
+});
+
+test('a failed refresh keeps the list and shows the error above it', () => {
+  const { hosts } = render('light', view({ error: http.MESSAGES.network }).element);
+  assert.ok(texts(hosts).includes(http.MESSAGES.network));
+  assert.equal(rows(hosts).length, 2);
+});
+
+test('pull-to-refresh reports its state and calls onRefresh', () => {
+  const { element, calls } = view({ refreshing: true });
+  const { hosts } = render('light', element);
+  const control = find(hosts, 'ScrollView')[0].props.refreshControl.props;
+  assert.equal(control.refreshing, true);
+  control.onRefresh();
+  assert.deepEqual(calls, [['refresh']]);
+});
+
+test('New observation is the footer button and opens the new observation screen', () => {
   const nav = navigation();
-  const { hosts } = render('light', createElement(Experiments, { navigation: nav }));
-  const button = find(hosts, 'Pressable').find(entry => entry.props.accessibilityLabel === undefined);
-  assert.match(footerHtml('light', hosts), /Analyze an image/);
-  assert.equal(button.props.accessibilityRole, 'button');
+  const { html, hosts } = render('light', createElement(Experiments, { navigation: nav }));
+  assert.match(footerHtml('light', hosts), /New observation/);
+  assert.doesNotMatch(html, /Analyze an image/);
+  const button = find(hosts, 'Pressable').find(entry => entry.props.accessibilityLabel === undefined && entry.props.accessibilityRole === 'button');
   assert.deepEqual(button.props.accessibilityState, { disabled: false, busy: false });
   button.props.onPress();
-  assert.deepEqual(nav.calls, [['Analysis']]);
+  assert.deepEqual(nav.calls, [['NewExperiment']]);
+});
+
+test('a change on this device makes the list reload on its next focus', async () => {
+  const changes = loadTs('src/api/logbookChanges.ts');
+  assert.equal(changes.logbookChangedSince(0), false);
+  changes.noteLogbookChanged(1000);
+  assert.equal(changes.logbookChangedSince(999), true);
+  assert.equal(changes.logbookChangedSince(1001), false);
+  changes.noteLogbookChanged(500);
+  assert.equal(changes.logbookChangedSince(1000), true);
 });
 
 test('Account is a 44 pt icon button that confirms before signing out', async () => {
@@ -66,6 +202,33 @@ test('Account is a 44 pt icon button that confirms before signing out', async ()
   assert.deepEqual(buttons.map(({ text, style }) => [text, style]), [['Cancel', 'cancel'], ['Sign out', 'destructive']]);
   await buttons[1].onPress();
   assert.equal(signOutCalls.length, 1);
+});
+
+test('loadLogbook combines the list and usage; a failed /v1/me only hides the usage', async () => {
+  const list = { items: [saved], complete: true };
+  const ok = await loadLogbook({ listAllExperiments: async () => list, getMe: async () => ({ user_id: ID, usage }) }, () => 42);
+  assert.deepEqual(ok, { items: [saved], complete: true, usage, loadedAt: 42 });
+  const failing = new http.ApiError('unavailable', 503, http.MESSAGES.unavailable);
+  const noUsage = await loadLogbook({ listAllExperiments: async () => list, getMe: async () => { throw failing; } }, () => 1);
+  assert.equal(noUsage.usage, null);
+  await assert.rejects(loadLogbook({ listAllExperiments: async () => { throw failing; }, getMe: async () => ({ user_id: ID, usage }) }), failing);
+});
+
+test('data goes stale shortly before the signed thumbnails expire', () => {
+  assert.ok(STALE_AFTER_MS < 600_000);
+  assert.equal(isStale(null, 0), true);
+  assert.equal(isStale(data({ loadedAt: 1000 }), 1000 + STALE_AFTER_MS), false);
+  assert.equal(isStale(data({ loadedAt: 1000 }), 1001 + STALE_AFTER_MS), true);
+});
+
+test('counts, titles and meta lines', () => {
+  assert.deepEqual(logbookCounts([saved, draft, { ...draft, id: 'x' }]), { saved: 1, drafts: 2 });
+  assert.equal(entryTitle(saved), 'Onion peel');
+  assert.equal(entryTitle(draft), 'Yeast cells');
+  assert.equal(entryTitle({ ...draft, title: '  ' }), 'Yeast cells');
+  assert.equal(entryTitle({ ...draft, probable_specimen: ' ' }), 'Untitled observation');
+  assert.match(entryMeta(saved), /24.* · Saved$/);
+  assert.match(entryMeta(draft), / · Draft$/);
 });
 
 test('formatLogbookDate shows the day of the month', () => {

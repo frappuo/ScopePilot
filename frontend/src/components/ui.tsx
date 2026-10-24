@@ -109,6 +109,8 @@ export function makeUiStyles(theme: Theme) {
     pillInfo: { backgroundColor: colors.infoSoft }, pillInfoText: { color: colors.info },
     pillWarning: { backgroundColor: colors.warningSoft }, pillWarningText: { color: colors.warning },
     pillNeutral: { backgroundColor: colors.surfaceMuted }, pillNeutralText: { color: colors.textMuted },
+    imageFrame: { width: '100%', aspectRatio: 4 / 3, backgroundColor: colors.surfaceMuted, borderRadius: radius.card, overflow: 'hidden' },
+    imageFill: { width: '100%', height: '100%' },
   });
 }
 
@@ -392,6 +394,15 @@ export function ListThumbnail({ uri, onError }: { uri: string | null; onError?: 
   if (!uri || failed) return <View style={styles.thumb} accessible={false} />;
   return <Image source={{ uri }} style={styles.thumb} resizeMode="cover" accessible={false}
     accessibilityIgnoresInvertColors onError={() => { setFailed(true); onError?.(); }} />;
+}
+
+// A 4:3 frame on the muted surface showing the whole image (contain). `label` is what screen readers hear.
+export function ImageFrame({ uri, label, onError }: { uri: string; label: string; onError?: () => void }) {
+  const [styles] = useUiStyles();
+  return <View style={styles.imageFrame}>
+    <Image source={{ uri }} style={styles.imageFill} resizeMode="contain" accessible accessibilityRole="image"
+      accessibilityLabel={label} accessibilityIgnoresInvertColors onError={onError} />
+  </View>;
 }
 
 export function StatRow({ children }: { children: ReactNode }) {

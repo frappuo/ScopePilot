@@ -10,6 +10,9 @@ export type RootStackParamList = {
   ForgotPassword: { email?: string } | undefined;
   SetNewPassword: undefined;
   Experiments: undefined;
+  NewExperiment: undefined;
+  // One observation, by ID. The screen is registered in a later commit.
+  Experiment: { id: string };
   // The pre-logbook analysis screen, removed once the logbook screens replace it.
   Analysis: undefined;
 };
