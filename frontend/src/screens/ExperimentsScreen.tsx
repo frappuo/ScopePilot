@@ -1,6 +1,7 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, RefreshControl } from 'react-native';
+import { dailyUsage, limitedUsage, useDailyUsage } from '../api/dailyUsage';
 import { ApiError, MESSAGES } from '../api/http';
 import { logbookChangedSince } from '../api/logbookChanges';
 import type { LogbookApi } from '../api/logbookApi';
@@ -23,7 +24,6 @@ export type LogbookData = {
   items: ExperimentSummary[];
   // False when there were more entries than listAllExperiments loads; the counts are then lower bounds.
   complete: boolean;
-  usage: DailyUsage | null;
   loadedAt: number;
 };
 
@@ -35,10 +35,11 @@ export function formatEntryDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
-// The list and today's usage. Usage is optional: if /v1/me fails, the list still shows.
-export async function loadLogbook(api: Pick<LogbookApi, 'listAllExperiments' | 'getMe'>, now = Date.now): Promise<LogbookData> {
-  const [list, me] = await Promise.all([api.listAllExperiments(), api.getMe().catch(() => null)]);
-  return { items: list.items, complete: list.complete, usage: me?.usage ?? null, loadedAt: now() };
+// The list. Today's usage comes from the shared store (dailyUsage.ts) and is optional: if /v1/me
+// fails, the list still shows.
+export async function loadLogbook(api: Pick<LogbookApi, 'listAllExperiments'>, now = Date.now): Promise<LogbookData> {
+  const list = await api.listAllExperiments();
+  return { items: list.items, complete: list.complete, loadedAt: now() };
 }
 
 export function isStale(data: LogbookData | null, now: number): boolean {
@@ -65,6 +66,7 @@ export function withoutEntry(data: LogbookData, id: string): LogbookData {
 
 export type LogbookViewProps = {
   data: LogbookData | null;
+  usage: DailyUsage | null;
   loading: boolean;
   refreshing: boolean;
   error: string | null;
@@ -83,7 +85,7 @@ export type LogbookViewProps = {
 };
 
 export function LogbookView({
-  data, loading, refreshing, error, busy, pendingIds = [], onRefresh, onRetry, onOpen, onNew, onAccount,
+  data, usage, loading, refreshing, error, busy, pendingIds = [], onRefresh, onRetry, onOpen, onNew, onAccount,
   onOptions, onEdit, onDelete,
 }: LogbookViewProps) {
   const { colors } = useTheme();
@@ -102,7 +104,7 @@ export function LogbookView({
       <StatRow>
         <StatTile count={counts.saved} label="Saved" capped={capped} />
         <StatTile count={counts.drafts} label="Drafts" capped={capped} />
-        {data.usage ? <StatTile count={data.usage.remaining} label="AI uses left today" /> : null}
+        {usage ? <StatTile count={usage.remaining} label="AI uses left today" /> : null}
       </StatRow>
       {data.items.length
         ? <ListGroup>
@@ -131,6 +133,7 @@ export default function ExperimentsScreen({ navigation }: ScreenProps<'Experimen
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
+  const usage = limitedUsage(useDailyUsage());
   const dataRef = useRef<LogbookData | null>(null);
   dataRef.current = data;
   // Only the latest load may update the screen; unmounting invalidates any load still running.
@@ -162,13 +165,15 @@ export default function ExperimentsScreen({ navigation }: ScreenProps<'Experimen
   }, [api]);
 
   // On focus: the first load, or a quiet reload once the signed thumbnails are about to expire or
-  // the logbook changed on this device (a new observation, for example).
+  // the logbook changed on this device (a new observation, for example). Usage has its own,
+  // shorter staleness (USAGE_STALE_AFTER_MS).
   useFocusEffect(useCallback(() => {
     const current = dataRef.current;
     if (isStale(current, Date.now()) || (current && logbookChangedSince(current.loadedAt))) {
       void load(current ? 'background' : 'initial');
     }
-  }, [load]));
+    void dailyUsage.refreshIfStale(api);
+  }, [load, api]));
 
   async function handleSignOut() {
     if (busy) return;
@@ -202,9 +207,10 @@ export default function ExperimentsScreen({ navigation }: ScreenProps<'Experimen
 
   const confirmDelete = (id: string) => askToDelete(() => { void runDelete(id); });
 
-  return <LogbookView data={data} loading={loading} refreshing={refreshing} error={error} busy={busy}
+  return <LogbookView data={data} usage={usage} loading={loading} refreshing={refreshing} error={error} busy={busy}
     pendingIds={pendingIds}
-    onRefresh={() => { void load('refresh'); }} onRetry={() => { void load('initial'); }}
+    onRefresh={() => { void load('refresh'); void dailyUsage.refresh(api); }}
+    onRetry={() => { void load('initial'); void dailyUsage.refreshIfStale(api); }}
     onOpen={id => navigation.navigate('Experiment', { id })}
     onNew={() => navigation.navigate('NewExperiment')} onAccount={openAccount}
     onOptions={item => showOptionsMenu(menuActions({ onEdit: () => edit(item.id), onDelete: () => confirmDelete(item.id) }), entryTitle(item))}

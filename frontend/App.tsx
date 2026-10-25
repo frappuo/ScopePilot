@@ -1,5 +1,6 @@
 import { Appearance } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { ApiProvider } from './src/api/ApiProvider';
 import { AuthProvider } from './src/auth/AuthProvider';
 import { readSupabaseConfig } from './src/config/env';
 import RootNavigator from './src/navigation/RootNavigator';
@@ -21,7 +22,7 @@ export default function App() {
       <SafeAreaProvider>
         <ThemedStatusBar />
         {supabaseConfig.ok
-          ? <AuthProvider config={supabaseConfig.config}><RootNavigator /></AuthProvider>
+          ? <AuthProvider config={supabaseConfig.config}><ApiProvider><RootNavigator /></ApiProvider></AuthProvider>
           : <ConfigErrorScreen problem={supabaseConfig.problem} />}
       </SafeAreaProvider>
     </ThemeProvider>

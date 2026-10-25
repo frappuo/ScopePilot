@@ -16,13 +16,18 @@ import { resolveApiUrl, tokenHeaders } from './config';
 // 60 + 60 + 10 = 130 s, plus a 10 s margin. If fallbacks are set, use (1 + F) x 60 + 80 s.
 export const CREATE_TIMEOUT_MS = 140_000;
 export const DEFAULT_TIMEOUT_MS = 20_000;
+// Ask and quiz (services/logbook.py _followup_analysis): the row read and the quota call at 10 s
+// each (SUPABASE_TIMEOUT_SECONDS), then one 60 s Gemini attempt: 80 s, plus a 10 s margin.
+// If fallbacks are set, use (1 + F) x 60 + 30 s.
+export const AI_TIMEOUT_MS = 90_000;
 
-export type ApiOp = 'create' | 'list' | 'read' | 'update' | 'delete' | 'me';
+export type ApiOp = 'create' | 'list' | 'read' | 'update' | 'delete' | 'me' | 'ask' | 'quiz';
 
+// 'aborted': the caller cancelled the request (the screen left). It has no message to show.
 export type ApiErrorKind =
   | 'configuration' | 'network' | 'timeout' | 'update_app' | 'session_ended' | 'not_found'
   | 'conflict' | 'invalid' | 'daily_limit' | 'server_limit' | 'not_configured' | 'unavailable'
-  | 'bad_response' | 'failed';
+  | 'ai_busy' | 'bad_response' | 'aborted' | 'failed';
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
@@ -59,16 +64,24 @@ export const MESSAGES = {
   analysisFailed: "The analysis didn't finish. Please try again.",
   badResponse: 'ScopePilot sent an unexpected response. Please try again.',
   failed: 'Something went wrong. Please try again.',
+  invalidQuestion: 'Enter a question of up to 500 characters.',
+  analysisTooLong: "This observation's analysis is too long for follow-up questions and quizzes.",
+  aiTimeout: "This is taking too long. Trying again may use another of today's AI requests.",
+  aiBusy: "The AI service is busy right now. Please try again later. This may have used one of today's AI requests.",
+  aiFailed: "The AI couldn't finish this request. Please try again. This may have used one of today's AI requests.",
+  aiTooSlow: "The AI took too long to respond. Please try again. This may have used one of today's AI requests.",
   dailyLimit: (time: string) => `You've used today's AI requests. They reset at ${time}.`,
-  serverLimit: (time: string) => `ScopePilot has reached today's analysis limit. Try again after ${time}.`,
+  serverLimit: (time: string) => `ScopePilot has reached today's AI request limit. Try again after ${time}.`,
 } as const;
 
 // Backend texts that are matched to pick a message (backend/app/middleware.py, services/gemini.py,
 // services/logbook.py). They are never displayed.
 const SERVER_LIMIT_PREFIX = 'Daily Gemini request limit';
+const AI_BUSY_PREFIX = 'Gemini quota or rate limit';
 const NOT_CONFIGURED = 'Logbook not configured.';
 const SIGN_IN_UNAVAILABLE = 'Sign-in is temporarily unavailable.';
 const TITLE_REQUIRED = 'A title is required to save.';
+const ANALYSIS_TOO_LONG = "This experiment's analysis is too long for follow-up questions.";
 
 export type UploadFile = { uri: string; mimeType: string };
 
@@ -82,6 +95,9 @@ export type ApiRequest<T> = {
   // Sent as the multipart field "image" with the native uploader.
   upload?: UploadFile;
   timeoutMs?: number;
+  // Aborting it ends the request with an 'aborted' ApiError. The backend may still finish the
+  // request, and an ask or quiz then still uses the quota.
+  signal?: AbortSignal;
   // Receives the parsed JSON body (undefined for 204); null means the response is malformed.
   parse: (body: unknown) => T | null;
 };
@@ -186,6 +202,7 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
     const detail = await readDetail(response);
     const text = typeof detail === 'string' ? detail : '';
     const create = op === 'create';
+    const ai = op === 'ask' || op === 'quiz';
     if (status === 401) return new ApiError('update_app', status, MESSAGES.updateApp);
     if (status === 404) return new ApiError('not_found', status, MESSAGES.notFound);
     if (status === 409) {
@@ -193,11 +210,18 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
       return new ApiError('conflict', status, message);
     }
     if (status === 400) return new ApiError('invalid', status, create ? MESSAGES.imageUnreadable : MESSAGES.failed);
-    if (status === 413) return new ApiError('invalid', status, create ? MESSAGES.imageTooLarge : MESSAGES.failed);
+    if (status === 413) {
+      const message = create ? MESSAGES.imageTooLarge : op === 'ask' ? MESSAGES.invalidQuestion : MESSAGES.failed;
+      return new ApiError('invalid', status, message);
+    }
     if (status === 415) return new ApiError('invalid', status, create ? MESSAGES.imageUnsupported : MESSAGES.failed);
     if (status === 422) {
+      // Ask and quiz: the stored analysis is over the caps, or (ask only) the question was
+      // rejected, which FastAPI reports with a list detail.
       const message = create ? MESSAGES.uploadRejected
         : op === 'update' ? (text === TITLE_REQUIRED ? MESSAGES.titleRequired : MESSAGES.invalidEdit)
+        : ai && text === ANALYSIS_TOO_LONG ? MESSAGES.analysisTooLong
+        : op === 'ask' ? MESSAGES.invalidQuestion
         : MESSAGES.failed;
       return new ApiError('invalid', status, message);
     }
@@ -211,6 +235,12 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
     }
     if (status === 503 && text === NOT_CONFIGURED) return new ApiError('not_configured', status, MESSAGES.notConfigured);
     if (status === 503 && text === SIGN_IN_UNAVAILABLE) return new ApiError('unavailable', status, MESSAGES.signInUnavailable);
+    // Ask and quiz charge the quota before Gemini (services/logbook.py _followup_analysis), so a
+    // Gemini busy (503), failure (502) or timeout (504) has usually used a request. A proxy in
+    // front of the backend can also return 502 or 504 before the request arrives.
+    if (ai && status === 503 && text.startsWith(AI_BUSY_PREFIX)) return new ApiError('ai_busy', status, MESSAGES.aiBusy);
+    if (ai && status === 502) return new ApiError('unavailable', status, MESSAGES.aiFailed);
+    if (ai && status === 504) return new ApiError('unavailable', status, MESSAGES.aiTooSlow);
     if (status >= 500) return new ApiError('unavailable', status, create ? MESSAGES.analysisFailed : MESSAGES.unavailable);
     return new ApiError('failed', status, MESSAGES.failed);
   }
@@ -227,20 +257,31 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
       throw new ApiError('configuration', null, error instanceof Error ? error.message : MESSAGES.failed);
     }
 
-    // One deadline for the whole request, retry included.
+    // One deadline for the whole request, retry included. A caller abort stops the same controller.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const caller = request.signal;
+    const cancel = () => controller.abort();
+    caller?.addEventListener('abort', cancel);
+    const aborted = () => {
+      diagnostic({ op: request.op, kind: 'aborted' });
+      return new ApiError('aborted', null, '');
+    };
     try {
       let token = tokenFrom(await getAccessToken(false));
       let response: Response | undefined;
       for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (caller?.aborted) throw aborted();
         try {
           response = await send(request, url, token, controller.signal);
         } catch {
+          if (caller?.aborted) throw aborted();
           const kind = controller.signal.aborted ? 'timeout' : 'network';
           diagnostic({ op: request.op, kind });
           throw new ApiError(kind, null, kind === 'network' ? MESSAGES.network
-            : request.op === 'create' ? MESSAGES.createTimeout : MESSAGES.timeout);
+            : request.op === 'create' ? MESSAGES.createTimeout
+            : request.op === 'ask' || request.op === 'quiz' ? MESSAGES.aiTimeout
+            : MESSAGES.timeout);
         }
         diagnostic({ op: request.op, status: response.status });
         if (!isBearerChallenge(response)) break;
@@ -252,18 +293,26 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
 
       if (!response.ok) {
         const error = await failure(request.op, response);
+        if (caller?.aborted) throw aborted();
         diagnostic({ op: request.op, status: error.status ?? undefined, kind: error.kind });
         throw error;
       }
       let body: unknown;
       if (response.status !== 204) {
         try { body = await response.json(); }
-        catch { throw new ApiError('bad_response', response.status, MESSAGES.badResponse); }
+        catch {
+          if (caller?.aborted) throw aborted();
+          throw new ApiError('bad_response', response.status, MESSAGES.badResponse);
+        }
       }
+      if (caller?.aborted) throw aborted();
       const parsed = request.parse(body);
       if (parsed === null) throw new ApiError('bad_response', response.status, MESSAGES.badResponse);
       return parsed;
-    } finally { clearTimeout(timeout); }
+    } finally {
+      clearTimeout(timeout);
+      caller?.removeEventListener('abort', cancel);
+    }
   }
 
   return { request };

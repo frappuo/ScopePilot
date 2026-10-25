@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { loadTs } = require('./helpers/loadTs.cjs');
 
 let nativeUpload;
-const { createApiClient, ApiError, MESSAGES, CREATE_TIMEOUT_MS } = loadTs('src/api/http.ts', {
+const { createApiClient, ApiError, MESSAGES, CREATE_TIMEOUT_MS, AI_TIMEOUT_MS } = loadTs('src/api/http.ts', {
   'expo-file-system': {
     File: class {
       constructor(uri) { this.uri = uri; }
@@ -162,6 +162,74 @@ test('the create timeout covers one Gemini attempt, the Supabase calls and the d
   assert.equal(CREATE_TIMEOUT_MS, (60 + 60 + 10 + 10) * 1000);
 });
 
+test('the ask and quiz timeout covers the row read, the quota call and one Gemini attempt', () => {
+  assert.equal(AI_TIMEOUT_MS, (10 + 10 + 60 + 10) * 1000);
+});
+
+test('ask and quiz get their own timeout message, which warns about another request', async () => {
+  global.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  });
+  const { api } = makeClient();
+  for (const op of ['ask', 'quiz']) {
+    const error = await rejection(api.request({ ...readMe, op, method: 'POST', timeoutMs: 10 }));
+    assert.deepEqual([error.kind, error.message], ['timeout', MESSAGES.aiTimeout]);
+  }
+  assert.match(MESSAGES.aiTimeout, /may use another of today's AI requests/);
+  // A busy, failed or slow AI response may or may not have reached the quota step.
+  for (const message of [MESSAGES.aiBusy, MESSAGES.aiFailed, MESSAGES.aiTooSlow]) {
+    assert.match(message, /This may have used one of today's AI requests\.$/);
+  }
+});
+
+test('a caller abort ends the request as aborted, with no message and no timeout', async () => {
+  let started = 0;
+  global.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+    started += 1;
+    signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  });
+  const caller = new AbortController();
+  const pending = rejection(makeClient().api.request({ ...readMe, op: 'ask', method: 'POST', signal: caller.signal }));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(started, 1);
+  caller.abort();
+  const error = await pending;
+  assert.ok(error instanceof ApiError);
+  assert.deepEqual([error.kind, error.status, error.message], ['aborted', null, '']);
+});
+
+test('an already aborted signal sends nothing', async () => {
+  global.fetch = async () => assert.fail('no request after an abort');
+  const caller = new AbortController();
+  caller.abort();
+  const error = await rejection(makeClient().api.request({ ...readMe, op: 'quiz', method: 'POST', signal: caller.signal }));
+  assert.deepEqual([error.kind, error.message], ['aborted', '']);
+});
+
+test('an abort while an error response is read is still aborted, not the error', async () => {
+  const caller = new AbortController();
+  global.fetch = async () => { caller.abort(); return json(502, { detail: SECRET }); };
+  const error = await rejection(makeClient().api.request({ ...readMe, op: 'ask', method: 'POST', signal: caller.signal }));
+  assert.deepEqual([error.kind, error.message], ['aborted', '']);
+});
+
+test('a signal that never aborts changes nothing', async () => {
+  global.fetch = async () => json(200, { answer: 'ok' });
+  const caller = new AbortController();
+  assert.deepEqual(await makeClient().api.request({ ...readMe, op: 'ask', signal: caller.signal }), { answer: 'ok' });
+});
+
+test('the server-wide limit message names the daily AI request limit for every op', () => {
+  assert.equal(MESSAGES.serverLimit('9:00 PM'), "ScopePilot has reached today's AI request limit. Try again after 9:00 PM.");
+  assert.doesNotMatch(MESSAGES.serverLimit('9:00 PM'), /analysis/i);
+});
+
+// Backend texts (services/logbook.py, services/gemini.py); matched, never shown.
+const TOO_LONG = "This experiment's analysis is too long for follow-up questions.";
+const DAILY_LIMIT = 'Daily AI request limit reached for your account. Try again after 00:00 UTC.';
+const SERVER_LIMIT = 'Daily Gemini request limit for this server reached. Try again after 00:00 UTC.';
+const GEMINI_BUSY = 'Gemini quota or rate limit reached. Try again later.';
+
 // [op, status, detail, headers, kind, message]
 const cases = [
   ['me', 401, 'Unauthorized client.', {}, 'update_app', MESSAGES.updateApp],
@@ -186,6 +254,36 @@ const cases = [
   ['create', 504, SECRET, {}, 'unavailable', MESSAGES.analysisFailed],
   ['read', 502, SECRET, {}, 'unavailable', MESSAGES.unavailable],
   ['read', 418, SECRET, {}, 'failed', MESSAGES.failed],
+  // Gemini-busy 503s keep the generic messages outside ask and quiz.
+  ['create', 503, GEMINI_BUSY, {}, 'unavailable', MESSAGES.analysisFailed],
+  ['update', 503, GEMINI_BUSY, {}, 'unavailable', MESSAGES.unavailable],
+  ['update', 413, SECRET, {}, 'invalid', MESSAGES.failed],
+  // Ask and quiz.
+  ['ask', 401, 'Unauthorized client.', {}, 'update_app', MESSAGES.updateApp],
+  ['ask', 404, 'Experiment not found.', {}, 'not_found', MESSAGES.notFound],
+  ['quiz', 404, 'Experiment not found.', {}, 'not_found', MESSAGES.notFound],
+  ['ask', 422, TOO_LONG, {}, 'invalid', MESSAGES.analysisTooLong],
+  ['ask', 422, [{ loc: ['body', 'question'], msg: SECRET }], {}, 'invalid', MESSAGES.invalidQuestion],
+  ['ask', 422, SECRET, {}, 'invalid', MESSAGES.invalidQuestion],
+  ['quiz', 422, TOO_LONG, {}, 'invalid', MESSAGES.analysisTooLong],
+  ['quiz', 422, [{ loc: ['body'], msg: SECRET }], {}, 'invalid', MESSAGES.failed],
+  ['ask', 413, SECRET, {}, 'invalid', MESSAGES.invalidQuestion],
+  ['quiz', 413, SECRET, {}, 'invalid', MESSAGES.failed],
+  ['ask', 409, SECRET, {}, 'conflict', MESSAGES.failed],
+  ['ask', 429, DAILY_LIMIT, { 'retry-after': '120' }, 'daily_limit', MESSAGES.dailyLimit(new Date(NOW + 120_000).toISOString())],
+  ['quiz', 429, DAILY_LIMIT, { 'retry-after': '120' }, 'daily_limit', MESSAGES.dailyLimit(new Date(NOW + 120_000).toISOString())],
+  ['ask', 503, SERVER_LIMIT, { 'retry-after': '90' }, 'server_limit', MESSAGES.serverLimit(new Date(NOW + 90_000).toISOString())],
+  ['quiz', 503, SERVER_LIMIT, { 'retry-after': '90' }, 'server_limit', MESSAGES.serverLimit(new Date(NOW + 90_000).toISOString())],
+  ['ask', 503, GEMINI_BUSY, {}, 'ai_busy', MESSAGES.aiBusy],
+  ['quiz', 503, GEMINI_BUSY, {}, 'ai_busy', MESSAGES.aiBusy],
+  ['ask', 502, 'Gemini could not answer the question.', {}, 'unavailable', MESSAGES.aiFailed],
+  ['quiz', 502, 'Gemini returned an invalid or empty quiz. Please try again.', {}, 'unavailable', MESSAGES.aiFailed],
+  ['ask', 504, 'Gemini request timed out. Please try again.', {}, 'unavailable', MESSAGES.aiTooSlow],
+  ['quiz', 504, 'Gemini request timed out. Please try again.', {}, 'unavailable', MESSAGES.aiTooSlow],
+  ['ask', 503, 'Logbook is temporarily unavailable. Please try again.', {}, 'unavailable', MESSAGES.unavailable],
+  ['quiz', 503, 'Gemini API key is not configured on the backend.', {}, 'unavailable', MESSAGES.unavailable],
+  ['ask', 500, SECRET, {}, 'unavailable', MESSAGES.unavailable],
+  ['quiz', 503, 'Logbook not configured.', {}, 'not_configured', MESSAGES.notConfigured],
 ];
 
 for (const [op, status, detail, headers, kind, message] of cases) {

@@ -9,9 +9,11 @@ const signOutCalls = [];
 const alerts = [];
 const focusEffects = [];
 let fakeApi = {};
+const usageModule = loadTs('src/api/dailyUsage.ts', { './http': http });
 const module_ = loadModule('src/screens/ExperimentsScreen.tsx', {
   '../auth/AuthProvider': { useAuth: () => ({ signOut: async () => { signOutCalls.push(true); } }) },
   '../api/http': http,
+  '../api/dailyUsage': usageModule,
   '../api/useLogbookApi': { useLogbookApi: () => fakeApi },
   '@react-navigation/native': { useFocusEffect: effect => { focusEffects.push(effect); } },
 }, { Alert: { alert: (...args) => alerts.push(args) } });
@@ -31,7 +33,7 @@ const draft = {
   created_at: '2026-10-23T09:00:00Z', saved_at: null, expires_at: '2026-10-24T09:00:00Z', thumb_url: null,
 };
 const usage = { used_today: 3, daily_limit: 40, remaining: 37, resets_at: '2026-10-25T00:00:00Z' };
-const data = (overrides = {}) => ({ items: [saved, draft], complete: true, usage, loadedAt: 0, ...overrides });
+const data = (overrides = {}) => ({ items: [saved, draft], complete: true, loadedAt: 0, ...overrides });
 
 function navigation() {
   const calls = [];
@@ -41,7 +43,7 @@ function navigation() {
 function view(props = {}) {
   const calls = [];
   const element = createElement(LogbookView, {
-    data: data(), loading: false, refreshing: false, error: null, busy: false,
+    data: data(), usage, loading: false, refreshing: false, error: null, busy: false,
     onRefresh: () => calls.push(['refresh']), onRetry: () => calls.push(['retry']),
     onOpen: id => calls.push(['open', id]), onNew: () => calls.push(['new']), onAccount: () => calls.push(['account']),
     onOptions: item => calls.push(['options', item.id]), onEdit: id => calls.push(['edit', id]),
@@ -105,7 +107,7 @@ test('tiles show counts only: saved, drafts and AI uses left today', () => {
 });
 
 test('without usage there are two tiles; an incomplete list shows lower bounds', () => {
-  const { hosts } = render('light', view({ data: data({ usage: null, complete: false }) }).element);
+  const { hosts } = render('light', view({ usage: null, data: data({ complete: false }) }).element);
   assert.deepEqual(tileLabels(hosts), ['Saved: 1+', 'Drafts: 1+']);
 });
 
@@ -207,14 +209,46 @@ test('Account is a 44 pt icon button that confirms before signing out', async ()
   assert.equal(signOutCalls.length, 1);
 });
 
-test('loadLogbook combines the list and usage; a failed /v1/me only hides the usage', async () => {
+test('loadLogbook loads only the list; usage comes from the shared store', async () => {
   const list = { items: [saved], complete: true };
-  const ok = await loadLogbook({ listAllExperiments: async () => list, getMe: async () => ({ user_id: ID, usage }) }, () => 42);
-  assert.deepEqual(ok, { items: [saved], complete: true, usage, loadedAt: 42 });
+  const calls = [];
+  const api = { listAllExperiments: async () => { calls.push('list'); return list; }, getMe: async () => { calls.push('me'); } };
+  assert.deepEqual(await loadLogbook(api, () => 42), { items: [saved], complete: true, loadedAt: 42 });
+  assert.deepEqual(calls, ['list']);
   const failing = new http.ApiError('unavailable', 503, http.MESSAGES.unavailable);
-  const noUsage = await loadLogbook({ listAllExperiments: async () => list, getMe: async () => { throw failing; } }, () => 1);
-  assert.equal(noUsage.usage, null);
-  await assert.rejects(loadLogbook({ listAllExperiments: async () => { throw failing; }, getMe: async () => ({ user_id: ID, usage }) }), failing);
+  await assert.rejects(loadLogbook({ listAllExperiments: async () => { throw failing; } }), failing);
+});
+
+test('the AI tile shows the shared usage; a failed /v1/me or unknown usage hides it', async () => {
+  const store = usageModule.dailyUsage;
+  store.clear();
+  const tilesFor = state => tileLabels(render('light', view({ usage: usageModule.limitedUsage(state) }).element).hosts);
+  await store.refresh({ getMe: async () => { throw new http.ApiError('unavailable', 503, http.MESSAGES.unavailable); } });
+  assert.equal(store.getState().error, 'unavailable');
+  assert.deepEqual(tilesFor(store.getState()), ['Saved: 1', 'Drafts: 1']);
+  await store.refresh({ getMe: async () => ({ user_id: ID, usage }) });
+  assert.deepEqual(tilesFor(store.getState()), ['Saved: 1', 'Drafts: 1', 'AI uses left today: 37']);
+  await store.refresh({ getMe: async () => ({ user_id: ID, usage: null }) });
+  assert.deepEqual(tilesFor(store.getState()), ['Saved: 1', 'Drafts: 1']);
+  store.clear();
+});
+
+test('focus refetches usage only once it is older than a minute', async () => {
+  const store = usageModule.dailyUsage;
+  store.clear();
+  const calls = [];
+  fakeApi = {
+    listAllExperiments: async () => ({ items: [], complete: true }),
+    getMe: async () => { calls.push('me'); return { user_id: ID, usage }; },
+  };
+  focusEffects.length = 0;
+  render('light', createElement(Experiments, { navigation: navigation() }));
+  focusEffects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  focusEffects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['me']);
+  store.clear();
 });
 
 test('data goes stale shortly before the signed thumbnails expire', () => {

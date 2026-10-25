@@ -6,20 +6,26 @@ const { palettes, loadModule, render, find, flatten, coloursOf, textOf } = requi
 
 const http = loadTs('src/api/http.ts', { 'expo-file-system': { File: class {}, UploadType: { MULTIPART: 1 } } });
 const changes = loadTs('src/api/logbookChanges.ts');
+const usageModule = loadTs('src/api/dailyUsage.ts', { './http': http });
+const store = usageModule.dailyUsage;
+const { formatResetTime } = loadModule('src/screens/usageStatus.tsx', { '../api/http': http });
 const menuCalls = [];
 const alerts = [];
 const focusEffects = [];
+let meCalls = 0;
+const fakeApi = { getExperiment: () => new Promise(() => {}), getMe: () => { meCalls += 1; return new Promise(() => {}); } };
 const module_ = loadModule('src/screens/ExperimentScreen.tsx', {
   '../api/http': http,
   '../api/logbookChanges': changes,
-  '../api/useLogbookApi': { useLogbookApi: () => ({ getExperiment: async () => new Promise(() => {}) }) },
+  '../api/dailyUsage': usageModule,
+  '../api/useLogbookApi': { useLogbookApi: () => fakeApi },
   '../components/optionsMenu': { showOptionsMenu: (...args) => menuCalls.push(args) },
   '@react-navigation/native': { useFocusEffect: effect => { focusEffects.push(effect); } },
 }, { Alert: { alert: (...args) => alerts.push(args) } });
 const Experiment = module_.default;
 const {
   DetailView, draftNotice, imageErrorAction, toFailure, formatDetailDate, menuActions, askToDelete, deleteObservation,
-  DELETE_TITLE, DELETE_BODY,
+  DELETE_TITLE, DELETE_BODY, ASK_QUIZ_COST,
 } = module_;
 
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
@@ -35,6 +41,9 @@ const draft = {
   thumb_url: null, image_url_expires_in: 600,
 };
 const saved = { ...draft, status: 'saved', title: 'Onion peel, lab 3', notes: 'Stained with iodine.', saved_at: '2026-10-24T10:05:00Z', expires_at: null };
+const usage = { used_today: 3, daily_limit: 40, remaining: 37, resets_at: '2026-10-25T00:00:00Z' };
+const spent = { ...usage, used_today: 40, remaining: 0 };
+const noop = () => {};
 
 function view(props = {}) {
   const calls = [];
@@ -50,6 +59,15 @@ const texts = hosts => find(hosts, 'Text').map(textOf);
 const headers = hosts => find(hosts, 'Text').filter(text => text.props.accessibilityRole === 'header').map(textOf);
 const buttonWithText = (hosts, label) => find(hosts, 'Pressable').find(entry =>
   find(render('light', entry.props.children).hosts, 'Text').some(text => textOf(text) === label));
+// The "Ask and quiz" card's own hosts, rendered on their own.
+const askCard = (scheme, hosts) => {
+  const card = find(hosts, 'View').find(entry => flatten(entry.props.style).backgroundColor === palettes[scheme].surface
+    && texts(render(scheme, entry.props.children).hosts).includes('Ask and quiz'));
+  return card ? render(scheme, card.props.children).hosts : null;
+};
+const askAndQuiz = props => view({ onAsk: noop, onQuiz: noop, ...props }).element;
+const enabled = { disabled: false, busy: false };
+const disabled = { disabled: true, busy: false };
 
 for (const scheme of ['light', 'dark']) {
   const colors = palettes[scheme];
@@ -58,6 +76,10 @@ for (const scheme of ['light', 'dark']) {
     const states = [
       view().element,
       view({ experiment: saved }).element,
+      view({ experiment: saved, onAsk() {}, onQuiz() {} }).element,
+      askAndQuiz({ experiment: saved, usage }),
+      askAndQuiz({ experiment: saved, usage: spent }),
+      askAndQuiz({ usage }),
       view({ imageUri: null }).element,
       view({ experiment: { ...draft, analysis: { ...analysis, visible_structures: [], observations: [], limitations: [] } } }).element,
       view({ experiment: null, loading: true }).element,
@@ -80,6 +102,58 @@ for (const scheme of ['light', 'dark']) {
     assert.ok(find(inCard.hosts, 'View').some(entry => flatten(entry.props.style).borderColor === colors.warning), 'warning glyph');
     assert.deepEqual(find(inCard.hosts, 'Text').map(textOf).filter(text => text.startsWith('•')),
       ['• Stain and focus limit detail.', '• Verify with an instructor.']);
+  });
+
+  test(`${scheme}: the Ask and quiz card holds the usage line, the cost line and both buttons`, () => {
+    const { html, hosts } = render(scheme, askAndQuiz({ experiment: saved, usage }));
+    const card = askCard(scheme, hosts);
+    assert.ok(card, 'Ask and quiz card');
+    assert.deepEqual(texts(card), [
+      'Ask and quiz', '37 of 40 AI requests left today.', ASK_QUIZ_COST, 'Ask a question', 'Test your understanding',
+    ]);
+    assert.equal(ASK_QUIZ_COST, "Each question or quiz uses one of today's AI requests.");
+    assert.deepEqual(buttonWithText(card, 'Ask a question').props.accessibilityState, enabled);
+    assert.deepEqual(buttonWithText(card, 'Test your understanding').props.accessibilityState, enabled);
+    assert.ok(headers(hosts).includes('Ask and quiz'));
+    // The disclaimer still closes the page, after the card.
+    const all = texts(hosts);
+    assert.equal(all[all.length - 1], 'Educational use only. Not a medical diagnosis.');
+    assert.doesNotMatch(html, /%|confidence|accuracy|score/i);
+  });
+
+  test(`${scheme}: at 0 left both buttons are disabled and the limit warning shows once, in the card`, () => {
+    const warning = http.MESSAGES.dailyLimit(formatResetTime(spent.resets_at));
+    const { html, hosts } = render(scheme, askAndQuiz({ experiment: saved, usage: spent }));
+    const card = askCard(scheme, hosts);
+    assert.deepEqual(texts(hosts).filter(text => text === warning), [warning]);
+    assert.deepEqual(texts(card).filter(text => text === warning), [warning]);
+    assert.ok(!texts(hosts).some(text => /AI requests left today/.test(text)));
+    assert.ok(texts(card).includes(ASK_QUIZ_COST));
+    assert.deepEqual(buttonWithText(card, 'Ask a question').props.accessibilityState, disabled);
+    assert.deepEqual(buttonWithText(card, 'Test your understanding').props.accessibilityState, disabled);
+    // A warning, not an error alert.
+    assert.equal(find(hosts, 'View').filter(entry => entry.props.accessibilityRole === 'alert').length, 0);
+    assert.doesNotMatch(html, /%/);
+  });
+
+  test(`${scheme}: with unknown usage there is no usage line and both buttons are enabled`, () => {
+    for (const element of [askAndQuiz({ experiment: saved, usage: null }), askAndQuiz({ experiment: saved })]) {
+      const { html, hosts } = render(scheme, element);
+      const card = askCard(scheme, hosts);
+      assert.deepEqual(texts(card), ['Ask and quiz', ASK_QUIZ_COST, 'Ask a question', 'Test your understanding']);
+      assert.deepEqual(buttonWithText(card, 'Ask a question').props.accessibilityState, enabled);
+      assert.deepEqual(buttonWithText(card, 'Test your understanding').props.accessibilityState, enabled);
+      assert.doesNotMatch(html, /AI requests left|%/);
+    }
+  });
+
+  test(`${scheme}: a draft offers both, enabled`, () => {
+    const { hosts } = render(scheme, askAndQuiz({ usage }));
+    assert.ok(texts(hosts).includes(draftNotice(draft)));
+    const card = askCard(scheme, hosts);
+    assert.ok(texts(card).includes('37 of 40 AI requests left today.'));
+    assert.deepEqual(buttonWithText(card, 'Ask a question').props.accessibilityState, enabled);
+    assert.deepEqual(buttonWithText(card, 'Test your understanding').props.accessibilityState, enabled);
   });
 }
 
@@ -116,10 +190,37 @@ test('the educational disclaimer closes the page', () => {
   assert.equal(all[all.length - 1], 'Educational use only. Not a medical diagnosis.');
 });
 
-test('ask and quiz are not offered', () => {
-  const { html, hosts } = render('light', view({ experiment: saved }).element);
-  assert.doesNotMatch(html, /quiz|ask a question|follow-up/i);
-  assert.equal(find(hosts, 'Pressable').length, 0);
+test('without Ask or Quiz handlers there is no card; each button calls its own handler', () => {
+  const without = render('light', view({ experiment: saved, usage }).element);
+  assert.doesNotMatch(without.html, /quiz|ask a question|AI requests/i);
+  assert.equal(find(without.hosts, 'Pressable').length, 0);
+  const { element, calls } = view({ experiment: saved, usage, onAsk: () => calls.push('ask') });
+  const { html, hosts } = render('light', element);
+  assert.doesNotMatch(html, /Test your understanding/);
+  const ask = buttonWithText(askCard('light', hosts), 'Ask a question');
+  assert.deepEqual(ask.props.accessibilityState, enabled);
+  ask.props.onPress();
+  assert.deepEqual(calls, ['ask']);
+});
+
+test('the Ask button opens the Ask screen with the ID only', () => {
+  const calls = [];
+  module_.openAsk({ navigate: (...args) => calls.push(args) }, ID);
+  assert.deepEqual(calls, [['AskExperiment', { id: ID }]]);
+});
+
+test('Test your understanding sits after Ask and opens the Quiz screen with the ID only', () => {
+  const pressed = [];
+  const { hosts } = render('light', view({ experiment: saved, onAsk: () => pressed.push('ask'), onQuiz: () => pressed.push('quiz') }).element);
+  const all = texts(hosts);
+  assert.equal(all.indexOf('Test your understanding'), all.indexOf('Ask a question') + 1);
+  const quiz = buttonWithText(hosts, 'Test your understanding');
+  assert.deepEqual(quiz.props.accessibilityState, { disabled: false, busy: false });
+  quiz.props.onPress();
+  assert.deepEqual(pressed, ['quiz']);
+  const calls = [];
+  module_.openQuiz({ navigate: (...args) => calls.push(args) }, ID);
+  assert.deepEqual(calls, [['QuizExperiment', { id: ID }]]);
 });
 
 test('a draft shows when it expires; a saved observation shows its title and notes', () => {
@@ -182,6 +283,7 @@ test('toFailure keeps fixed messages only', () => {
 });
 
 test('the screen starts with a spinner and registers a focus reload', () => {
+  store.clear();
   focusEffects.length = 0;
   const { hosts } = render('light', createElement(Experiment, {
     route: { params: { id: ID } }, navigation: { setOptions() {}, goBack() {}, navigate() {} },
@@ -192,6 +294,28 @@ test('the screen starts with a spinner and registers a focus reload', () => {
   assert.doesNotThrow(() => focusEffects[0]());
   assert.equal(menuCalls.length, 0);
   assert.match(formatDetailDate(draft.created_at), /2026/);
+  store.clear();
+});
+
+test('focus refetches usage only when it is stale', async () => {
+  store.clear();
+  focusEffects.length = 0;
+  render('light', createElement(Experiment, {
+    route: { params: { id: ID } }, navigation: { setOptions() {}, goBack() {}, navigate() {} },
+  }));
+  // Never fetched: focus fetches.
+  meCalls = 0;
+  focusEffects[0]();
+  assert.equal(meCalls, 1);
+  assert.equal(store.getState().loading, true);
+  // Fetched just now (for example by Ask or Quiz after a request): focus does not fetch again.
+  store.clear();
+  await store.refresh({ getMe: async () => ({ user_id: ID, usage }) });
+  meCalls = 0;
+  focusEffects[0]();
+  assert.equal(meCalls, 0);
+  assert.equal(store.getState().loading, false);
+  store.clear();
 });
 
 test('a draft has a Save to logbook footer; a saved observation does not', () => {

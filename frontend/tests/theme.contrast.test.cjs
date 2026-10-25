@@ -22,6 +22,12 @@ const CONTRAST_PAIRS = [
   ['accent', 'surface', UI],
 ];
 
+// OptionRow (src/components/ui.tsx): the correct (tick) and incorrect (cross) glyphs on each
+// background a row can have: surface, or accentSoft when checked. WCAG 1.4.11 non-text contrast.
+const OPTION_BACKGROUNDS = ['surface', 'accentSoft'];
+const OPTION_GLYPHS = ['success', 'danger'];
+const GLYPH_PAIRS = OPTION_GLYPHS.flatMap(fg => OPTION_BACKGROUNDS.map(bg => [fg, bg, UI]));
+
 for (const scheme of ['light', 'dark']) {
   const colors = palettes[scheme];
 
@@ -31,6 +37,15 @@ for (const scheme of ['light', 'dark']) {
       .filter(pair => pair.ratio < pair.minimum)
       .map(pair => `${pair.fg} on ${pair.bg}: ${pair.ratio.toFixed(2)} < ${pair.minimum}`);
     assert.deepEqual(failures, []);
+  });
+
+  test(`${scheme}: quiz result glyphs stand out from every option background`, () => {
+    const failures = GLYPH_PAIRS
+      .map(([fg, bg, minimum]) => ({ fg, bg, minimum, ratio: contrastRatio(colors[fg], colors[bg]) }))
+      .filter(pair => pair.ratio < pair.minimum)
+      .map(pair => `${pair.fg} glyph on ${pair.bg}: ${pair.ratio.toFixed(2)} < ${pair.minimum}`);
+    assert.deepEqual(failures, []);
+    assert.equal(GLYPH_PAIRS.length, 4);
   });
 
   test(`${scheme}: each soft colour is its foreground at 13% over surface`, () => {

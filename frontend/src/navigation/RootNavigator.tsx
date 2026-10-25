@@ -5,11 +5,13 @@ import { useAuth } from '../auth/AuthProvider';
 import { gateFor } from '../auth/authState';
 import { Loading } from '../components/ui';
 import AnalysisScreen from '../screens/AnalysisScreen';
+import AskExperimentScreen from '../screens/AskExperimentScreen';
 import ConfigErrorScreen from '../screens/ConfigErrorScreen';
 import EditExperimentScreen from '../screens/EditExperimentScreen';
 import ExperimentScreen from '../screens/ExperimentScreen';
 import ExperimentsScreen from '../screens/ExperimentsScreen';
 import NewExperimentScreen from '../screens/NewExperimentScreen';
+import QuizExperimentScreen from '../screens/QuizExperimentScreen';
 import ForgotPasswordScreen from '../screens/auth/ForgotPasswordScreen';
 import SetNewPasswordScreen from '../screens/auth/SetNewPasswordScreen';
 import SignInScreen from '../screens/auth/SignInScreen';
@@ -54,6 +56,10 @@ export default function RootNavigator() {
           options={{ title: 'Observation', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
         <Stack.Screen name="EditExperiment" component={EditExperimentScreen}
           options={{ title: 'Edit', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="AskExperiment" component={AskExperimentScreen}
+          options={{ title: 'Ask', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="QuizExperiment" component={QuizExperimentScreen}
+          options={{ title: 'Quiz', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
         <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analyze an image' }} />
       </>}
     </Stack.Navigator>

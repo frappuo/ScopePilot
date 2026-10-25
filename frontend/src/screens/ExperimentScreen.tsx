@@ -1,5 +1,6 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { dailyUsage, limitedUsage, useDailyUsage } from '../api/dailyUsage';
 import { ApiError, MESSAGES, type ApiErrorKind } from '../api/http';
 import { logbookChangedSince } from '../api/logbookChanges';
 import { useLogbookApi } from '../api/useLogbookApi';
@@ -8,9 +9,10 @@ import {
   AppText, Button, Card, Chip, ChipRow, Group, IconButton, ImageFrame, Loading, Notice, Pill, Screen, SectionLabel,
 } from '../components/ui';
 import type { ScreenProps } from '../navigation/types';
-import type { Experiment } from '../types/experiment';
+import type { DailyUsage, Experiment } from '../types/experiment';
 import { DISCLAIMER } from './copy';
 import { askToDelete, deleteObservation, menuActions } from './observationActions';
+import { limitReached, UsageStatus } from './usageStatus';
 
 // Shared with the logbook list; re-exported for existing callers and tests.
 export { askToDelete, deleteObservation, menuActions, DELETE_BODY, DELETE_TITLE } from './observationActions';
@@ -54,13 +56,32 @@ export type DetailViewProps = {
   // A failed delete, shown above the observation.
   actionError?: string | null;
   busy?: boolean;
+  // Today's usage as figures; null before the first fetch or while the backend can't read it.
+  usage?: DailyUsage | null;
   onImageError(): void;
   onRetry(): void;
   onBack(): void;
   onSave?(): void;
+  onAsk?(): void;
+  onQuiz?(): void;
 };
 
-export function DetailView({ experiment, loading, error, imageUri, actionError, busy, onImageError, onRetry, onBack, onSave }: DetailViewProps) {
+type Navigate = Pick<ScreenProps<'Experiment'>['navigation'], 'navigate'>;
+
+// Open the Ask and Quiz screens with the ID only; they work from the stored analysis.
+export function openAsk(navigation: Navigate, id: string): void {
+  navigation.navigate('AskExperiment', { id });
+}
+
+export const ASK_QUIZ_COST = "Each question or quiz uses one of today's AI requests.";
+
+export function openQuiz(navigation: Navigate, id: string): void {
+  navigation.navigate('QuizExperiment', { id });
+}
+
+export function DetailView({
+  experiment, loading, error, imageUri, actionError, busy, usage = null, onImageError, onRetry, onBack, onSave, onAsk, onQuiz,
+}: DetailViewProps) {
   if (!experiment) {
     return <Screen fill>
       {loading && !error ? <Loading /> : null}
@@ -74,6 +95,8 @@ export function DetailView({ experiment, loading, error, imageUri, actionError, 
   }
   const { analysis } = experiment;
   const draft = experiment.status === 'draft';
+  // Drafts can be asked about and quizzed too; only known figures at 0 left disable the buttons.
+  const blocked = limitReached(usage);
   return <Screen footer={draft && onSave ? <Button size="large" title="Save to logbook" onPress={onSave} disabled={busy} /> : undefined}>
     {actionError ? <Notice kind="error">{actionError}</Notice> : null}
     {experiment.title ? <AppText accessibilityRole="header" variant="headline">{experiment.title}</AppText> : null}
@@ -106,6 +129,14 @@ export function DetailView({ experiment, loading, error, imageUri, actionError, 
       <SectionLabel title="Notes" />
       <AppText>{experiment.notes}</AppText>
     </Card> : null}
+    {onAsk || onQuiz ? <Card>
+      <SectionLabel title="Ask and quiz" />
+      {/* At 0 left this is the daily-limit warning: the reason both buttons are disabled. */}
+      <UsageStatus usage={usage} />
+      <AppText tone="muted">{ASK_QUIZ_COST}</AppText>
+      {onAsk ? <Button variant="secondary" title="Ask a question" onPress={onAsk} disabled={blocked} /> : null}
+      {onQuiz ? <Button variant="secondary" title="Test your understanding" onPress={onQuiz} disabled={blocked} /> : null}
+    </Card> : null}
     <AppText variant="caption">{DISCLAIMER}</AppText>
   </Screen>;
 }
@@ -114,7 +145,6 @@ export function DetailView({ experiment, loading, error, imageUri, actionError, 
 // image: the refetch for fresh signed URLs, which only gives up on the image on failure.
 type LoadMode = 'initial' | 'refresh' | 'image';
 
-// Ask and quiz are not offered in this version.
 export default function ExperimentScreen({ navigation, route }: ScreenProps<'Experiment'>) {
   const { id } = route.params;
   const api = useLogbookApi();
@@ -124,6 +154,8 @@ export default function ExperimentScreen({ navigation, route }: ScreenProps<'Exp
   const [imageFailed, setImageFailed] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Optional: if /v1/me fails, the buttons stay enabled and a 429 is the final word.
+  const usage = limitedUsage(useDailyUsage());
   const refetchedForImage = useRef(false);
   const loadedAt = useRef(0);
   // Only the latest load may update the screen; unmounting invalidates any load still running.
@@ -155,10 +187,12 @@ export default function ExperimentScreen({ navigation, route }: ScreenProps<'Exp
 
   useEffect(() => { void load('initial'); }, [load]);
 
-  // Back from the edit screen: show the saved values.
+  // Back from the edit screen: show the saved values. Back from Ask or Quiz: those screens have
+  // already refetched usage after each request; a stale count (over 60 s) is refetched here.
   useFocusEffect(useCallback(() => {
     if (loadedAt.current && logbookChangedSince(loadedAt.current)) void load('refresh');
-  }, [load]));
+    void dailyUsage.refreshIfStale(api);
+  }, [load, api]));
 
   const confirmDelete = useCallback(() => {
     askToDelete(async () => {
@@ -191,8 +225,9 @@ export default function ExperimentScreen({ navigation, route }: ScreenProps<'Exp
     void load('image');
   }, [load]);
 
-  return <DetailView experiment={experiment} loading={loading} error={error} actionError={actionError} busy={deleting}
+  return <DetailView experiment={experiment} loading={loading} error={error} actionError={actionError} busy={deleting} usage={usage}
     imageUri={imageFailed ? null : experiment?.image_url ?? null} onImageError={onImageError}
     onRetry={() => { void load('initial'); }} onBack={() => navigation.goBack()}
-    onSave={() => navigation.navigate('EditExperiment', { id, save: true })} />;
+    onSave={() => navigation.navigate('EditExperiment', { id, save: true })} onAsk={() => openAsk(navigation, id)}
+    onQuiz={() => openQuiz(navigation, id)} />;
 }

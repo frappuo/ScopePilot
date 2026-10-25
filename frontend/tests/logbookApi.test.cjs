@@ -4,9 +4,10 @@ const { loadTs } = require('./helpers/loadTs.cjs');
 
 // logbookApi.ts gets this http module as its './http', so ApiError instanceof checks agree.
 const http = loadTs('src/api/http.ts', { 'expo-file-system': { File: class {}, UploadType: { MULTIPART: 1 } } });
-const { ApiError, MESSAGES, CREATE_TIMEOUT_MS } = http;
+const { ApiError, MESSAGES, CREATE_TIMEOUT_MS, AI_TIMEOUT_MS } = http;
 const {
   createLogbookApi, parseExperiment, parseSummary, parsePage, parseMe, isUuid, PAGE_LIMIT, MAX_PAGES,
+  parseAnswer, parseQuiz, stripLikePython, questionLength, QUESTION_MAX,
 } = loadTs('src/api/logbookApi.ts', { './http': http });
 
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
@@ -184,4 +185,116 @@ test('getMe reads /v1/me', async () => {
   const { api, requests } = fakeClient([{ user_id: ID, email: 'student@example.com', usage: null }]);
   assert.deepEqual(await api.getMe(), { user_id: ID, usage: null });
   assert.deepEqual([requests[0].op, requests[0].method, requests[0].path], ['me', 'GET', '/v1/me']);
+});
+
+const question = (text, options = ['Cell wall', 'Nucleus', 'Chloroplast', 'Vacuole'], correct = 'Cell wall') => ({
+  question: text, options, correct_answer: correct, explanation: 'Plant cells have a cell wall.',
+});
+const quiz = { questions: [question('Q1?'), question('Q2?'), question('Q3?')] };
+
+test('ask posts the stripped question to the ask path with the AI timeout and the signal', async () => {
+  const { api, requests } = fakeClient([{ answer: 'An answer.' }]);
+  const signal = new AbortController().signal;
+  assert.equal(await api.askExperiment(ID.toUpperCase(), '  What is this?\n', { signal }), 'An answer.');
+  const [request] = requests;
+  assert.deepEqual([request.op, request.method, request.path], ['ask', 'POST', `/v1/experiments/${ID}/ask`]);
+  assert.deepEqual(request.json, { question: 'What is this?' });
+  assert.equal(request.timeoutMs, AI_TIMEOUT_MS);
+  assert.equal(request.signal, signal);
+});
+
+test('quiz posts no body to the quiz path with the AI timeout and the signal', async () => {
+  const { api, requests } = fakeClient([quiz]);
+  const signal = new AbortController().signal;
+  assert.deepEqual(await api.quizExperiment(ID, { signal }), quiz);
+  const [request] = requests;
+  assert.deepEqual([request.op, request.method, request.path], ['quiz', 'POST', `/v1/experiments/${ID}/quiz`]);
+  assert.equal(request.json, undefined);
+  assert.equal(request.timeoutMs, AI_TIMEOUT_MS);
+  assert.equal(request.signal, signal);
+});
+
+test('ask and quiz with a non-UUID ID never reach the network', async () => {
+  const { api, requests } = fakeClient([]);
+  for (const call of [() => api.askExperiment('../me', 'Why?'), () => api.quizExperiment(`${ID}/x`)]) {
+    const error = await call().catch(e => e);
+    assert.ok(error instanceof ApiError);
+    assert.deepEqual([error.kind, error.message], ['not_found', MESSAGES.notFound]);
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('an empty or too long question is rejected without a request', async () => {
+  const { api, requests } = fakeClient([]);
+  for (const text of ['', '   \n\t', 'a'.repeat(QUESTION_MAX + 1), `${'a'.repeat(QUESTION_MAX)}😀`]) {
+    const error = await api.askExperiment(ID, text).catch(e => e);
+    assert.ok(error instanceof ApiError);
+    assert.deepEqual([error.kind, error.status, error.message], ['invalid', null, MESSAGES.invalidQuestion]);
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('the question limit counts code points after stripping, as Python does', async () => {
+  const atLimit = ['a'.repeat(500), `  ${'a'.repeat(500)}  `, '😀'.repeat(500), `${'a'.repeat(499)}😀`];
+  const { api, requests } = fakeClient(atLimit.map(() => ({ answer: 'ok' })));
+  for (const text of atLimit) await api.askExperiment(ID, text);
+  assert.equal(requests.length, atLimit.length);
+  assert.equal('😀'.repeat(500).length, 1000);
+  assert.equal(questionLength('😀'.repeat(500)), 500);
+  assert.equal(questionLength(`${'a'.repeat(500)}😀`), 501);
+});
+
+test('stripping matches Python str.strip(), not JavaScript trim()', () => {
+  assert.equal(stripLikePython('\x1c\x1f\x85 　 hi  \t'), 'hi');
+  // U+FEFF is not whitespace to Python, so the backend keeps it and so does the app.
+  assert.equal(stripLikePython('﻿'), '﻿');
+  assert.equal(questionLength('﻿'), 1);
+});
+
+test('parseAnswer keeps a non-empty answer, stripped, and nothing else', () => {
+  assert.equal(parseAnswer({ answer: '  Plant cells.\n' }), 'Plant cells.');
+  assert.equal(parseAnswer({ answer: 'Plant cells.', model: 'x' }), 'Plant cells.');
+  for (const bad of [null, 'text', [], {}, { answer: '' }, { answer: ' \n ' }, { answer: 3 }, { answer: null }]) {
+    assert.equal(parseAnswer(bad), null);
+  }
+});
+
+test('a valid quiz is copied with only the known fields', () => {
+  const extra = { ...quiz, model: 'x', questions: quiz.questions.map(q => ({ ...q, hint: 'leak' })) };
+  const parsed = parseQuiz(extra);
+  assert.deepEqual(parsed, quiz);
+  assert.equal('model' in parsed, false);
+  assert.equal('hint' in parsed.questions[0], false);
+});
+
+test('quiz texts are stripped as the backend does, so a padded answer still matches its option', () => {
+  const padded = question(' Q1? ', [' Cell wall ', 'Nucleus', 'Chloroplast', 'Vacuole'], 'Cell wall  ');
+  const parsed = parseQuiz({ questions: [padded, question('Q2?'), question('Q3?')] });
+  assert.deepEqual(parsed.questions[0], question('Q1?'));
+});
+
+const badQuizzes = {
+  'not an object': null,
+  'questions not a list': { questions: {} },
+  'two questions': { questions: quiz.questions.slice(0, 2) },
+  'four questions': { questions: [...quiz.questions, question('Q4?')] },
+  'three options': { questions: [question('Q1?', ['A', 'B', 'C'], 'A'), question('Q2?'), question('Q3?')] },
+  'five options': { questions: [question('Q1?', ['A', 'B', 'C', 'D', 'E'], 'A'), question('Q2?'), question('Q3?')] },
+  'duplicate options': { questions: [question('Q1?', ['A', 'A', 'C', 'D'], 'A'), question('Q2?'), question('Q3?')] },
+  'options equal after stripping': { questions: [question('Q1?', ['A', ' A', 'C', 'D'], 'A'), question('Q2?'), question('Q3?')] },
+  'an empty option': { questions: [question('Q1?', ['A', ' ', 'C', 'D'], 'A'), question('Q2?'), question('Q3?')] },
+  'a numeric option': { questions: [question('Q1?', ['A', 2, 'C', 'D'], 'A'), question('Q2?'), question('Q3?')] },
+  'an answer that is not an option': { questions: [question('Q1?', ['A', 'B', 'C', 'D'], 'E'), question('Q2?'), question('Q3?')] },
+  'a blank question': { questions: [question('  '), question('Q2?'), question('Q3?')] },
+  'an empty explanation': { questions: [{ ...question('Q1?'), explanation: '' }, question('Q2?'), question('Q3?')] },
+  'a missing correct answer': { questions: [(({ correct_answer, ...rest }) => rest)(question('Q1?')), question('Q2?'), question('Q3?')] },
+};
+for (const [name, value] of Object.entries(badQuizzes)) {
+  test(`a quiz with ${name} is rejected`, () => assert.equal(parseQuiz(value), null));
+}
+
+test('a malformed ask or quiz response is a bad response', async () => {
+  const { api } = fakeClient([{ answer: '' }, { questions: [] }]);
+  assert.equal((await api.askExperiment(ID, 'Why?').catch(e => e)).kind, 'bad_response');
+  assert.equal((await api.quizExperiment(ID).catch(e => e)).kind, 'bad_response');
 });

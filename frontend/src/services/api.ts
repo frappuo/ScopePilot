@@ -1,5 +1,6 @@
 import { File, UploadType } from 'expo-file-system';
 
+import { sanitizeAnswer } from '../api/answerText';
 import { diagnostic, isAnalysis, resolveApiUrl, tokenHeaders } from '../api/config';
 import type { Analysis, AskResponse, SelectedImage } from '../types/analysis';
 import type { Quiz, QuizQuestion } from '../types/quiz';
@@ -118,16 +119,7 @@ export async function analyzeImage(image: SelectedImage): Promise<Analysis> {
   } finally { clearTimeout(timeout); }
 }
 
-export function sanitizeAnswer(answer: string): string {
-  return answer
-    .replace(/^[ \t]{0,3}#{1,6}[ \t]*/gm, '')
-    .replace(/[ \t]+#+[ \t]*$/gm, '')
-    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
-    .replace(/__([^_\n]+)__/g, '$1')
-    .replace(/^\s*[-*]\s+/gm, '• ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
+export { sanitizeAnswer };
 
 export async function askQuestion(analysis: Analysis, question: string): Promise<string> {
   const trimmedQuestion = question.trim();

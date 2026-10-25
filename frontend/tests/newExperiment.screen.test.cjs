@@ -6,11 +6,16 @@ const { palettes, loadModule, render, find, flatten, coloursOf, textOf, footerHt
 
 const http = loadTs('src/api/http.ts', { 'expo-file-system': { File: class {}, UploadType: { MULTIPART: 1 } } });
 const changes = loadTs('src/api/logbookChanges.ts');
+const usageModule = loadTs('src/api/dailyUsage.ts', { './http': http });
+const focusEffects = [];
+let fakeApi = {};
 const module_ = loadModule('src/screens/NewExperimentScreen.tsx', {
   '../api/http': http,
+  '../api/dailyUsage': usageModule,
   '../api/logbookChanges': changes,
-  '../api/useLogbookApi': { useLogbookApi: () => ({}) },
+  '../api/useLogbookApi': { useLogbookApi: () => fakeApi },
   '../services/images': { selectImage: async () => null },
+  '@react-navigation/native': { useFocusEffect: effect => { focusEffects.push(effect); } },
 });
 const NewExperiment = module_.default;
 const { NewObservationView, createObservation, usageLine, limitReached, formatResetTime, DISCLAIMER } = module_;
@@ -119,26 +124,77 @@ test('usage helpers', () => {
   assert.equal(limitReached(null), false);
 });
 
-test('a successful create returns the new ID and marks the logbook changed', async () => {
+// Records what createObservation hands to the usage store.
+function usageRecorder() {
+  const calls = [];
+  return { calls, refreshAfter: async (api, error) => { calls.push(error); } };
+}
+
+test('a successful create returns the new ID, marks the logbook changed and refreshes usage', async () => {
   const uploads = [];
   const before = Date.now();
+  const usageStore = usageRecorder();
   const outcome = await createObservation({
     createExperiment: async upload => { uploads.push(upload); return { id: ID }; },
-  }, image);
+  }, image, usageStore);
   assert.deepEqual(outcome, { ok: true, id: ID });
   assert.deepEqual(uploads, [{ uri: image.uri, mimeType: 'image/jpeg' }]);
   assert.equal(changes.logbookChangedSince(before), true);
+  assert.deepEqual(usageStore.calls, [undefined]);
 });
 
 test('a failed create returns the fixed message; only a timeout marks the logbook changed', async () => {
-  const fail = error => createObservation({ createExperiment: async () => { throw error; } }, image);
+  const usageStore = usageRecorder();
+  const fail = error => createObservation({ createExperiment: async () => { throw error; } }, image, usageStore);
   const later = Date.now() + 60_000;
-  const limit = await fail(new http.ApiError('daily_limit', 429, 'You have used today\'s AI requests.'));
-  assert.deepEqual(limit, { ok: false, message: 'You have used today\'s AI requests.' });
+  const limitError = new http.ApiError('daily_limit', 429, 'You have used today\'s AI requests.', 60);
+  const limit = await fail(limitError);
+  assert.deepEqual(limit, { ok: false, message: 'You have used today\'s AI requests.', limitReached: true });
   assert.equal(changes.logbookChangedSince(later), false);
   changes.noteLogbookChanged(0);
   const unknown = await fail(new Error('raw backend text'));
   assert.deepEqual(unknown, { ok: false, message: http.MESSAGES.failed });
-  const timeout = await fail(new http.ApiError('timeout', null, http.MESSAGES.createTimeout));
+  const timeoutError = new http.ApiError('timeout', null, http.MESSAGES.createTimeout);
+  const timeout = await fail(timeoutError);
   assert.deepEqual(timeout, { ok: false, message: http.MESSAGES.createTimeout });
+  // The store decides from the error whether to refetch (dailyUsage.test.cjs).
+  assert.equal(usageStore.calls.length, 3);
+  assert.equal(usageStore.calls[0], limitError);
+  assert.equal(usageStore.calls[2], timeoutError);
+});
+
+test('the screen shows the shared usage and refetches it on focus only when stale', async () => {
+  const store = usageModule.dailyUsage;
+  store.clear();
+  const calls = [];
+  fakeApi = { getMe: async () => { calls.push('me'); return { user_id: ID, usage }; } };
+  focusEffects.length = 0;
+  const before = render('light', createElement(NewExperiment, { navigation: { goBack() {} } })).hosts;
+  assert.ok(!texts(before).some(text => /AI requests/.test(text)));
+  focusEffects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  focusEffects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['me']);
+  const after = render('light', createElement(NewExperiment, { navigation: { goBack() {} } })).hosts;
+  assert.ok(texts(after).includes('37 of 40 AI requests left today.'));
+  store.clear();
+  fakeApi = {};
+});
+
+test('a 429 blocks Analyze at once, before the refetch answers', async () => {
+  const store = usageModule.dailyUsage;
+  store.clear();
+  await store.refresh({ getMe: async () => ({ user_id: ID, usage }) });
+  let answer;
+  const pending = store.refreshAfter({ getMe: () => new Promise(resolve => { answer = resolve; }) },
+    new http.ApiError('daily_limit', 429, 'x', 3600));
+  const blocked = usageModule.limitedUsage(store.getState());
+  assert.equal(limitReached(blocked), true);
+  const { hosts } = render('light', view({ image, usage: blocked }).element);
+  assert.deepEqual(footerButton(hosts).props.accessibilityState, { disabled: true, busy: false });
+  answer({ user_id: ID, usage: spent });
+  await pending;
+  assert.deepEqual(store.getState().usage, spent);
+  store.clear();
 });

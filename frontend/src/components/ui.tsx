@@ -1,4 +1,4 @@
-import { Children, Fragment, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { Children, Fragment, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react';
 import { ActivityIndicator, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type RefreshControlProps, type StyleProp, type TextInputProps, type TextProps, type ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../theme/ThemeProvider';
@@ -9,7 +9,7 @@ import type { Theme, TypeVariant } from '../theme/tokens';
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive';
 type NoticeKind = 'error' | 'info' | 'success' | 'warning';
 type TextTone = 'default' | 'muted' | 'accent' | 'danger';
-export type Glyph = 'account' | 'chevron' | 'more' | 'warning';
+export type Glyph = 'account' | 'chevron' | 'more' | 'warning' | 'correct' | 'incorrect';
 type PillTone = 'info' | 'warning' | 'neutral';
 
 // Thumbnail edge in list rows; the row separators are inset to start after it.
@@ -97,6 +97,17 @@ export function makeUiStyles(theme: Theme) {
     dot: { width: 4, height: 4, borderRadius: radius.pill, backgroundColor: colors.textMuted },
     warningRing: { width: 20, height: 20, borderRadius: radius.pill, borderWidth: 2, borderColor: colors.warning, alignItems: 'center', justifyContent: 'center' },
     warningMark: { fontSize: 12, lineHeight: 14, fontWeight: '700', color: colors.warning },
+    tick: { width: 7, height: 13, marginBottom: 3, borderRightWidth: 2, borderBottomWidth: 2, borderColor: colors.success, transform: [{ rotate: '45deg' }] },
+    cross: { width: 16, height: 16 },
+    crossBar: { position: 'absolute', top: 7, left: 0, width: 16, height: 2, borderRadius: 1, backgroundColor: colors.danger },
+    crossBarDown: { transform: [{ rotate: '45deg' }] },
+    crossBarUp: { transform: [{ rotate: '-45deg' }] },
+    option: {
+      flexDirection: 'row', alignItems: 'center', gap: spacing.sm, minHeight: 48, paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
+      backgroundColor: colors.surface, borderColor: colors.borderStrong, borderWidth: 1, borderRadius: radius.control,
+    },
+    optionChecked: { backgroundColor: colors.accentSoft, borderColor: colors.accent },
+    optionText: { flex: 1, gap: spacing.xxs },
     listGroup: { backgroundColor: colors.surface, borderRadius: radius.card, ...theme.elevation },
     listSeparator: { height: StyleSheet.hairlineWidth, marginLeft: spacing.lg + LIST_THUMB_SIZE + spacing.md, backgroundColor: colors.border },
     listRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 64, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
@@ -114,6 +125,7 @@ export function makeUiStyles(theme: Theme) {
     imageFill: { width: '100%', height: '100%' },
     imageEmpty: { alignItems: 'center', justifyContent: 'center' },
     group: { gap: spacing.xs },
+    stack: { gap: spacing.sm },
     sectionLabel: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
     sectionLabelWarning: { color: colors.warning },
   });
@@ -140,10 +152,11 @@ const NOTICE_TEXT: Record<NoticeKind, 'errorText' | 'infoText' | 'successText' |
 };
 
 // `footer` stays pinned below the scrolling content and rises with the keyboard; `fill` lets a
-// Spacer push the last content line to the bottom; `refreshControl` adds pull-to-refresh.
-export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, fill, refreshControl }: {
+// Spacer push the last content line to the bottom; `refreshControl` adds pull-to-refresh;
+// `scrollRef` lets a screen scroll its content (to a new answer, say).
+export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, fill, refreshControl, scrollRef }: {
   children: ReactNode; edges?: ('top' | 'bottom' | 'left' | 'right')[]; footer?: ReactNode; fill?: boolean;
-  refreshControl?: ReactElement<RefreshControlProps>;
+  refreshControl?: ReactElement<RefreshControlProps>; scrollRef?: Ref<ScrollView>;
 }) {
   const [styles, theme] = useUiStyles();
   // KeyboardAvoidingView compares its own frame with the keyboard's window position, so it needs
@@ -153,7 +166,7 @@ export function Screen({ children, edges = ['bottom', 'left', 'right'], footer, 
   return <SafeAreaView edges={edges} style={styles.safe}>
     <View ref={frame} style={styles.flex} onLayout={() => frame.current?.measureInWindow((_x, y) => setOffset(y))}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={offset} style={styles.flex}>
-        <ScrollView contentContainerStyle={[styles.page, fill && styles.pageFill]} keyboardShouldPersistTaps="handled"
+        <ScrollView ref={scrollRef} contentContainerStyle={[styles.page, fill && styles.pageFill]} keyboardShouldPersistTaps="handled"
           indicatorStyle={theme.scheme === 'dark' ? 'white' : 'default'} refreshControl={refreshControl}>
           {children}
         </ScrollView>
@@ -196,13 +209,16 @@ export function Field({ label, ...input }: TextInputProps & { label: string }) {
   </View>;
 }
 
-export function Button({ title, onPress, disabled, busy, variant = 'primary', size = 'regular' }: {
+// `accessibilityLabel` keeps the button named while `busy` replaces its title with a spinner.
+export function Button({ title, onPress, disabled, busy, variant = 'primary', size = 'regular', accessibilityLabel }: {
   title: string; onPress: () => void; disabled?: boolean; busy?: boolean; variant?: ButtonVariant; size?: 'regular' | 'large';
+  accessibilityLabel?: string;
 }) {
   const [styles, theme] = useUiStyles();
   const inactive = Boolean(disabled || busy);
   const filled = variant === 'primary' || variant === 'destructive';
-  return <Pressable accessibilityRole="button" accessibilityState={{ disabled: inactive, busy: Boolean(busy) }}
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel}
+    accessibilityState={{ disabled: inactive, busy: Boolean(busy) }}
     disabled={inactive} onPress={onPress}
     style={({ pressed }) => [styles.button, size === 'large' && styles.buttonLarge, styles[variant], (inactive || pressed) && styles.dim]}>
     {busy ? <ActivityIndicator color={filled ? theme.colors.onAccent : theme.colors.accent} />
@@ -312,6 +328,10 @@ export function GlyphView({ glyph }: { glyph: Glyph }) {
     {glyph === 'more' && <View style={styles.dots}><View style={styles.dot} /><View style={styles.dot} /><View style={styles.dot} /></View>}
     {glyph === 'warning' && <View style={styles.warningRing}>
       <Text maxFontSizeMultiplier={1} style={styles.warningMark}>!</Text>
+    </View>}
+    {glyph === 'correct' && <View style={styles.tick} />}
+    {glyph === 'incorrect' && <View style={styles.cross}>
+      <View style={[styles.crossBar, styles.crossBarDown]} /><View style={[styles.crossBar, styles.crossBarUp]} />
     </View>}
   </View>;
 }
@@ -433,6 +453,12 @@ export function Group({ children }: { children: ReactNode }) {
   return <View style={styles.group}>{children}</View>;
 }
 
+// Stacks a few controls (a field, its counter, a button) with a small gap, for a Screen footer.
+export function Stack({ children }: { children: ReactNode }) {
+  const [styles] = useUiStyles();
+  return <View style={styles.stack}>{children}</View>;
+}
+
 // A small section header inside a card, optionally with a glyph. The words carry the meaning;
 // the glyph and the warning colour only support them.
 export function SectionLabel({ title, glyph, tone = 'default' }: { title: string; glyph?: Glyph; tone?: 'default' | 'warning' }) {
@@ -474,6 +500,24 @@ export function Chip({ label }: { label: string }) {
 const PILL: Record<PillTone, ['pillInfo' | 'pillWarning' | 'pillNeutral', 'pillInfoText' | 'pillWarningText' | 'pillNeutralText']> = {
   info: ['pillInfo', 'pillInfoText'], warning: ['pillWarning', 'pillWarningText'], neutral: ['pillNeutral', 'pillNeutralText'],
 };
+
+// One choice of a single-answer question, read as a radio button. `note` (for example "Correct
+// answer") and its glyph mark the result in words and shape, never by colour alone; the note is
+// part of the spoken label. Locked (disabled) options keep full contrast so the result stays readable.
+export function OptionRow({ label, checked, disabled, glyph, note, onPress }: {
+  label: string; checked: boolean; disabled: boolean; glyph?: Glyph; note?: string; onPress(): void;
+}) {
+  const [styles] = useUiStyles();
+  return <Pressable accessibilityRole="radio" accessibilityState={{ checked, disabled }}
+    accessibilityLabel={note ? `${label}. ${note}` : label} disabled={disabled} onPress={onPress}
+    style={({ pressed }) => [styles.option, checked && styles.optionChecked, pressed && !disabled && styles.dim]}>
+    {glyph ? <GlyphView glyph={glyph} /> : null}
+    <View style={styles.optionText}>
+      <AppText>{label}</AppText>
+      {note ? <AppText variant="label" tone="default">{note}</AppText> : null}
+    </View>
+  </Pressable>;
+}
 
 // A short status label such as "Tentative"; the word carries the meaning, the colour only supports it.
 export function Pill({ label, tone = 'neutral' }: { label: string; tone?: PillTone }) {
