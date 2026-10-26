@@ -37,11 +37,11 @@ test('infers supported type and fallback name without changing URI', async () =>
   assert.equal(selected.name, 'microscopy.webp');
 });
 test('MIME metadata wins over filename extension', async () => {
-  await assert.rejects(pickerResult({ canceled: false, assets: [{ uri: 'file:///test/photo.jpg', mimeType: 'image/heic' }] }), /HEIC conversion is disabled/);
+  await assert.rejects(pickerResult({ canceled: false, assets: [{ uri: 'file:///test/photo.jpg', mimeType: 'image/heic' }] }), /image type can't be used/);
 });
 test('rejects unknown and HEIC assets instead of labeling them JPEG', async () => {
   for (const uri of ['ph://opaque-id', 'file:///test/photo.heic']) {
-    await assert.rejects(pickerResult({ canceled: false, assets: [{ uri }] }), /JPEG, PNG, or WebP/);
+    await assert.rejects(pickerResult({ canceled: false, assets: [{ uri }] }), /JPEG, PNG or WebP/);
   }
 });
 test('cancelling selection leaves the previous image alone', async () => {

@@ -1,0 +1,71 @@
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { useMemo } from 'react';
+import { useAuth } from '../auth/AuthProvider';
+import { gateFor } from '../auth/authState';
+import { Loading } from '../components/ui';
+import AccountScreen from '../screens/AccountScreen';
+import AskExperimentScreen from '../screens/AskExperimentScreen';
+import DeleteAccountScreen from '../screens/DeleteAccountScreen';
+import ConfigErrorScreen from '../screens/ConfigErrorScreen';
+import EditExperimentScreen from '../screens/EditExperimentScreen';
+import ExperimentScreen from '../screens/ExperimentScreen';
+import ExperimentsScreen from '../screens/ExperimentsScreen';
+import NewExperimentScreen from '../screens/NewExperimentScreen';
+import QuizExperimentScreen from '../screens/QuizExperimentScreen';
+import ForgotPasswordScreen from '../screens/auth/ForgotPasswordScreen';
+import SetNewPasswordScreen from '../screens/auth/SetNewPasswordScreen';
+import SignInScreen from '../screens/auth/SignInScreen';
+import SignUpScreen from '../screens/auth/SignUpScreen';
+import VerifyCodeScreen from '../screens/auth/VerifyCodeScreen';
+import { toNavigationTheme } from '../theme/navigationTheme';
+import { useTheme } from '../theme/ThemeProvider';
+import type { RootStackParamList } from './types';
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+// Header, tint and background colours come from the navigation theme.
+const screenOptions = { headerShadowVisible: false } as const;
+
+// Auth back buttons show only the chevron: SignIn has no title, so iOS would show its route name.
+const authScreenOptions = { headerBackButtonDisplayMode: 'minimal' } as const;
+
+// Signed out (or mid password recovery) shows only the auth screens; signed in shows only the
+// app screens. Switching groups unmounts the other one, so no screen state survives sign-out.
+export default function RootNavigator() {
+  const { state, clientError } = useAuth();
+  const theme = useTheme();
+  const navigationTheme = useMemo(() => toNavigationTheme(theme), [theme]);
+  if (clientError) return <ConfigErrorScreen problem="client" />;
+  const gate = gateFor(state);
+  if (gate === 'splash') return <Loading />;
+  return <NavigationContainer theme={navigationTheme}>
+    <Stack.Navigator screenOptions={screenOptions}>
+      {gate === 'auth' ? <Stack.Group screenOptions={authScreenOptions}>
+        <Stack.Screen name="SignIn" component={SignInScreen} options={{ headerShown: false }} />
+        <Stack.Screen name="SignUp" component={SignUpScreen} options={{ title: 'Create account', headerTitle: '' }} />
+        <Stack.Screen name="VerifyCode" component={VerifyCodeScreen} options={{ title: 'Enter code', headerTitle: '' }} />
+        <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} options={{ title: 'Forgot password', headerTitle: '' }} />
+        <Stack.Screen name="SetNewPassword" component={SetNewPasswordScreen}
+          options={{ title: 'New password', headerTitle: '', headerBackVisible: false, gestureEnabled: false }} />
+      </Stack.Group> : <>
+        <Stack.Screen name="Experiments" component={ExperimentsScreen} options={{ title: 'ScopePilot', headerShown: false }} />
+        <Stack.Screen name="NewExperiment" component={NewExperimentScreen}
+          options={{ title: 'New observation', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        {/* The screen sets its header title to the observation's date. */}
+        <Stack.Screen name="Experiment" component={ExperimentScreen}
+          options={{ title: 'Observation', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="EditExperiment" component={EditExperimentScreen}
+          options={{ title: 'Edit', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="AskExperiment" component={AskExperimentScreen}
+          options={{ title: 'Ask', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="QuizExperiment" component={QuizExperimentScreen}
+          options={{ title: 'Quiz', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="Account" component={AccountScreen}
+          options={{ title: 'Account', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="DeleteAccount" component={DeleteAccountScreen}
+          options={{ title: 'Delete account', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+      </>}
+    </Stack.Navigator>
+  </NavigationContainer>;
+}

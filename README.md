@@ -1,24 +1,50 @@
 # ScopePilot
 
-AI-assisted microscopy education. AI observations are tentative, require student/instructor verification, and are not medical diagnoses.
+**ScopePilot: An AI-Assisted Microscopy Observation System Using Vision Language Models.**
 
-## Status
+Educational microscopy only. ScopePilot is not a diagnostic system: it does not diagnose disease or replace a teacher, a lab manual or expert judgment.
 
-Implemented:
+## 1. What it is
 
-- FastAPI backend: `GET /health`, `POST /analyze` (image → structured analysis), `POST /ask` (follow-up question about the current analysis), `POST /quiz` (three multiple-choice questions from the current analysis). The three legacy routes return 410 when `LEGACY_API_ENABLED=false` (see Request limits).
-- Expo TypeScript app: gallery image selection, analysis display, follow-up Q&A, and quiz.
-- Braintrust prompt-evaluation harness (`backend/evals/microscopy_eval.py`).
+A student photographs the view through a microscope and picks the photo in the app. The app has no in-app camera, so the photo comes from the phone's photo library. The app sends the image to a FastAPI backend. The backend calls Gemini and returns a tentative, structured analysis with five parts: probable specimen, visible structures, observations, explanation and limitations. From there the student can ask follow-up questions about the observation, take a three-question quiz, and keep the observation in a personal logbook (title, notes, saved or draft).
 
-The backend also has a student logbook API under `/v1` (sign-in with a Supabase access token, saved experiments, and follow-up questions and quizzes on a saved experiment), but the app has no accounts or logbook screens yet.
+The analysis is a starting point, not an answer. The student checks everything against what they actually see and against trusted course material.
 
-Not implemented: RAG, camera capture in the app, the app's login and logbook screens, and per-user rate limiting on the legacy routes (they can be switched off instead). Backend CORS is intentionally off (see Request limits). See [docs/HANDOFF.md](docs/HANDOFF.md) for architecture, status, planned features, and known issues.
+## 2. Architecture
 
-## Backend
+```
+Expo app (React Native, TypeScript)
+  → FastAPI /v1 API: verifies the Supabase access token, applies a per-user daily AI limit
+    → Gemini (image analysis, follow-up answers, quizzes)
+Supabase: accounts (Auth), logbook rows (Postgres), images (private Storage bucket)
+```
 
-### Setup (PowerShell, from repository root)
+- **Keys stay on the server.** The model sits behind the backend, and the Gemini API key exists only on the server, never in the app. The app signs in with Supabase's publishable key. Logbook data is read and written only by the backend, with the Supabase secret key, and every query is scoped to the signed-in user.
+- **Image handling.** The backend checks the declared type, size, pixel count and frame count of each image. It then re-encodes the image without EXIF/GPS metadata before anything is sent to Gemini or stored. iPhone camera JPEGs (detected as MPO) are accepted, using their first frame.
+- **Limits.** Request bodies have size limits. Each user has a daily AI limit, shared by create, ask and quiz (`USER_DAILY_GEMINI_LIMIT`), and the server has its own daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`). There is also an optional shared app token (`APP_TOKEN`). The token ships inside the app, so it deters casual clients but is not authentication.
+- **Legacy routes.** The original routes (`/analyze`, `/ask`, `/quiz`) have no user accounts. They are still served unless `LEGACY_API_ENABLED=false`, which answers them with 410.
+- **CORS is off on purpose.** The native app doesn't need it, so the browser preview can't call the API.
 
-Use Python 3.12 or newer. If `python` is unavailable, replace it in the first command with the full path to your Python executable.
+Layout:
+- `backend/app`: `routes/` (HTTP only), `schemas/` (Pydantic), `services/` (Gemini, images, logbook, auth), `config.py`, `middleware.py`
+- `backend/tests`, `backend/evals`
+- `supabase/migrations`
+- `frontend/src`: `api/`, `auth/`, `components/`, `navigation/`, `screens/`, `theme/`
+- `frontend/tests`
+
+## 3. Setup
+
+All commands are PowerShell and run from the repository root unless noted. You need Python 3.12 or newer, Node.js 22.14 or newer with npm, a Gemini API key, and a Supabase project.
+
+### Supabase (once)
+
+1. Create a project.
+2. In the SQL editor, run `supabase/migrations/0001_logbook.sql` and then `0002_logbook_caps.sql`. Run both before the backend uses the project.
+3. Turn on email confirmation for Auth. Before real users sign up, configure custom SMTP and use OTP codes in the email templates; the app confirms sign-up and password recovery with a 6-digit code.
+
+More detail is in [docs/HANDOFF.md](docs/HANDOFF.md), section 5.
+
+### Backend
 
 ```powershell
 python -m venv backend/.venv
@@ -26,80 +52,60 @@ python -m venv backend/.venv
 Copy-Item backend/.env.example backend/.env
 ```
 
-Create the environment file only once; do not overwrite an existing configuration. Edit `backend/.env` and set `GEMINI_API_KEY` to your key. Environment variables override this file. Restart the backend after changes.
+Copy the file only once, so an existing configuration is never overwritten. In `backend/.env`, set:
+- `GEMINI_API_KEY`;
+- `SUPABASE_URL`, the project origin, such as `https://<project-ref>.supabase.co`;
+- `SUPABASE_SECRET_KEY`.
 
-`GEMINI_MODEL` selects the model; it must support image input and structured JSON output, and your key must have access to it. The default in `backend/app/config.py` is `gemini-2.5-flash`, which an earlier live check (see `progress.md`) found unavailable to new users. `backend/.env.example` sets `gemini-3.1-flash-lite`. Other settings: `GEMINI_FALLBACK_MODELS` (empty; up to 3 models tried only on quota or model-not-found errors, see `docs/HANDOFF.md`), `GEMINI_TIMEOUT_SECONDS` (default 60), `MAX_IMAGE_BYTES` (10 MiB), `MAX_IMAGE_PIXELS` (20,000,000), `MAX_ENCODED_IMAGE_BYTES` (14 MiB; not listed in `.env.example`), `MAX_JSON_BODY_BYTES` (64 KiB), `GEMINI_DAILY_CALL_LIMIT` (100), `APP_TOKEN` (empty = check off; see App token), `LEGACY_API_ENABLED` (`true`; see Request limits). Numeric settings must be positive.
+The secret key bypasses row-level security, so keep it on the backend host only. Every other setting is described in `backend/.env.example`. Environment variables override the file. `.env` files are ignored by Git; only the `.env.example` files are committed.
 
-`.env` files are ignored by Git; only `.env.example` belongs in version control. Never put API keys in source files or the frontend.
-
-### Run (from repository root)
+Run the backend:
 
 ```powershell
 .\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --no-access-log --ws none
 ```
 
-Keep this terminal open. In a second PowerShell terminal:
+Keep `--no-access-log --ws none` everywhere, including on a host. The flags keep request paths and queries out of the logs. Don't use `--root-path`, because the middlewares match the raw path. To check that the backend is up, run `Invoke-RestMethod http://127.0.0.1:8000/health` from a second terminal; it should return `{"status":"ok"}`. This shows only that the backend is running, not that the Gemini key works.
+
+### Frontend
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/health
+Push-Location frontend
+npm.cmd ci
+Copy-Item .env.example .env
+Pop-Location
 ```
 
-Startup fails clearly if `GEMINI_API_KEY` is missing or blank. The application loads user-managed `backend/.env` regardless of the working directory and never writes that file. Startup errors omit configuration values.
+Fill in `frontend/.env` using the comments in `frontend/.env.example`:
+- **`EXPO_PUBLIC_API_URL`:** the backend origin, with no path.
+- **`EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`:** use the publishable key, never the secret key. The app refuses to start with a secret key.
+- **`EXPO_PUBLIC_APP_TOKEN`:** only if the backend sets `APP_TOKEN`.
 
-Expected JSON: `{"status":"ok"}`. This checks backend liveness after configuration loads, not Gemini credential validity or availability. Interactive API documentation: http://127.0.0.1:8000/docs.
+Every `EXPO_PUBLIC_` value is compiled into the app bundle, so none of them may be a secret. Restart Expo after any change. On a phone, open the app in an Expo Go version compatible with SDK 57.
 
-### Analyze an image
+## 4. Local device testing
 
-```powershell
-curl.exe -X POST http://127.0.0.1:8000/analyze -F "image=@C:/path/to/microscopy.jpg;type=image/jpeg"
-```
+On a physical phone, `localhost` and `127.0.0.1` point to the phone itself, not your computer. The tested setup uses a cloudflared quick tunnel. The tunnel address changes every run, so repeat steps 2 and 3 each time.
 
-The multipart field is `image`. Accepted declared types: `image/jpeg`, `image/png`, `image/webp`. Before Gemini is called, `prepare_image` in `backend/app/services/images.py`:
+1. Start the backend on `127.0.0.1:8000` as above. While the tunnel is open, turn the legacy routes off and keep the server-wide cap low:
+   ```powershell
+   $env:LEGACY_API_ENABLED = 'false'
+   $env:GEMINI_DAILY_CALL_LIMIT = '20'
+   .\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --no-access-log --ws none
+   ```
+2. In a second terminal, run `cloudflared tunnel --url http://127.0.0.1:8000`. Set `EXPO_PUBLIC_API_URL` in `frontend/.env` to the `https://<name>.trycloudflare.com` origin it prints.
+3. In a third terminal, clear any stale shell variable, then start Expo with a cleared cache:
+   ```powershell
+   Remove-Item Env:EXPO_PUBLIC_API_URL -ErrorAction SilentlyContinue
+   Push-Location frontend
+   npx.cmd expo start -c --tunnel
+   ```
 
-1. Rejects empty uploads, uploads over `MAX_IMAGE_BYTES`, and other declared types.
-2. Reads only the image header and checks that the detected format matches the declared type, that width × height is within `MAX_IMAGE_PIXELS`, and that the image has one frame. iPhone camera JPEGs, which Pillow detects as MPO with two frames, are accepted as JPEG; animated GIF/PNG/WebP are rejected.
-3. Decodes the first frame, applies EXIF orientation, and re-encodes it without EXIF/GPS, XMP, or text metadata (the ICC colour profile is kept when the image mode is unchanged): JPEG/MPO → JPEG quality 95 (a deliberate second lossy encode); PNG → PNG, lossless, keeping mode, alpha, palette, and 16-bit grayscale; WebP → WebP quality 95. No resizing.
-4. Rejects re-encoded output over `MAX_ENCODED_IMAGE_BYTES`.
+The pitfall: a `$env:EXPO_PUBLIC_API_URL` set earlier in the same PowerShell session overrides `frontend/.env` without any warning, and the app keeps calling an old address. That is why step 3 clears it.
 
-Only one image is decoded/re-encoded at a time; a request that waits more than 5 seconds for its turn gets 503. Rejections are logged with the rule, declared type, and detected format only. Uploads are not retained by application code; FastAPI may temporarily spool multipart files while receiving a request. The file-size check runs after multipart parsing, so it is not a total HTTP request-body limit.
+## 5. Tests
 
-Success returns `probable_specimen`, `visible_structures`, `observations`, `explanation`, and `limitations`, validated with Pydantic. A valid schema guarantees shape, not biological correctness.
-
-Errors use `{"detail":"..."}` (FastAPI validation errors use a detail list):
-
-| Status | Cause |
-|---|---|
-| 400 | Empty, corrupt, or undecodable image |
-| 401 | Missing or wrong `X-ScopePilot-Token` while `APP_TOKEN` is set |
-| 410 | Legacy `/analyze`, `/ask` or `/quiz` while `LEGACY_API_ENABLED=false` |
-| 413 | Request body over limit, upload over size limit, resolution over pixel limit, or re-encoded image too large |
-| 415 | Unsupported declared type, content not matching the declared type, or multi-frame image |
-| 422 | Missing upload, invalid request body, or `/ask`/`/quiz` analysis over the input caps |
-| 502 | Gemini provider, network, or response-validation failure; unavailable model |
-| 503 | Missing API key, Gemini quota/rate limit, server busy decoding another image, or daily Gemini limit reached (with `Retry-After`) |
-| 504 | Gemini timeout |
-
-No automatic provider retries are made.
-
-### Request limits
-
-- **Middleware order** (`backend/app/main.py`): Legacy -> AppToken -> Bearer -> BodySize. Each check answers from the path and headers before the body is read. Do not start the backend with `--root-path`: the middlewares match the raw request path.
-- **Legacy switch** (`LEGACY_API_ENABLED`, default `true`): when `false`, `/analyze`, `/ask` and `/quiz` (any method) get 410 `{"detail": "This version of ScopePilot is no longer supported. Please update the app."}` before the app token check or any body read; `/health` and `/v1` are unaffected. Any value other than true/false/1/0/yes/no/on/off stops startup. Flip it on Render only after an app build that uses `/v1` has shipped; rollout and rollback in `docs/HANDOFF.md`.
-- **Body size** (`backend/app/middleware.py`): `/analyze` and `POST /v1/experiments` allow `MAX_IMAGE_BYTES` + 64 KiB of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES`; `/health` is exempt. A `Content-Length` over the limit gets 413 before anything is read; a chunked body is counted as it streams and gets 413 once it passes the limit.
-- **Input caps** for the analysis sent to `/ask` and `/quiz`: `probable_specimen` ≤ 300 characters, `explanation` ≤ 6000, each list ≤ 40 items of ≤ 1000 characters; over a cap gives 422. The `/analyze` response is not capped.
-- **Daily Gemini cap**: at most `GEMINI_DAILY_CALL_LIMIT` Gemini attempts per UTC day, fallback attempts included; then 503 with `Retry-After` (seconds until 00:00 UTC). The count is per process and resets on restart; Google's own quota reset time may differ from UTC midnight. Requests rejected before Gemini (bad images, caps, body size) do not count.
-- These are global limits, not per-user rate limiting or authentication.
-- **CORS is intentionally not enabled.** The native app does not need it, and CORS only restricts browsers, so it is not an abuse control. As a result the browser preview cannot call the API.
-
-### App token (not authentication)
-
-- With `APP_TOKEN` set, every path except `/health` (including `/docs`) requires the header `X-ScopePilot-Token` with the same value, compared in constant time. A missing or wrong token gets 401 `{"detail": "Unauthorized client."}` before the request body is read. Empty `APP_TOKEN` turns the check off.
-- The app sends `EXPO_PUBLIC_APP_TOKEN` (from `frontend/.env`) in that header when it is set, and sends nothing otherwise.
-- `EXPO_PUBLIC_` values are compiled into the app bundle, so anyone with the app can extract the token. It deters casual scripts and drive-by web pages (a custom header forces a CORS preflight, and CORS is off), but it is **not authentication**. Real protection needs user accounts.
-- Rollout order: (1) ship the updated app built with `EXPO_PUBLIC_APP_TOKEN`; (2) set `APP_TOKEN` on Render; (3) confirm an old build now shows "This app version can't reach the service. Please update the app." (401).
-- Use dummy values in examples and tests; never commit a real token.
-
-### Tests (from repository root)
+The backend tests use synthetic images and mock Gemini and Supabase, so they need no keys:
 
 ```powershell
 Push-Location backend
@@ -107,55 +113,65 @@ Push-Location backend
 Pop-Location
 ```
 
-`--basetemp` avoids Windows temp-folder permission errors. Tests use synthetic images and mock Gemini at the SDK boundary, so they need no API key and do not verify live model quality or access.
+`--basetemp` avoids Windows temp-folder permission errors.
 
-## Frontend
-
-The Expo TypeScript app selects one gallery image, previews it, uploads it, and displays Probable Specimen, Visible Structures, Observations, Explanation, and Limitations, followed by a follow-up question box and a three-question quiz. It uses local React state and a dedicated API service (`frontend/src/services/api.ts`).
-
-The app uploads the original picked file without converting, resizing, or cropping it (`frontend/src/services/images.ts`). The type comes from the picker's MIME type, or the file extension if none is given; HEIC and unrecognized types are rejected in the app. Normalization (orientation, metadata removal, re-encoding) happens on the backend.
-
-For 400, 413, and 415 responses, the app appends the backend's short `detail` message to its own error text. Details from 5xx responses and 422 are intentionally never shown; those use fixed messages written in the app:
-
-- 401 and 410: "This app version can't reach the service. Please update the app."
-- 429: "Too many requests right now. Please wait a minute and try again."
-- 503 from the daily Gemini cap: a fixed "Today's ScopePilot analysis limit has been reached…" message. The app recognizes the backend detail by its prefix but never displays it; any other 503 gets the generic message.
-- `/ask` and `/quiz` 413, and `/quiz` 422, have their own messages. For an `/ask` 422 the app reads only the structured error locations: a too-long question gets "Please enter a question of up to 500 characters."; anything else (such as the analysis caps) gets "This request could not be processed. Please analyze the image again."
-
-Install from the repository root (Node.js 22.14+ and npm):
+The frontend tests mock HTTP and never call the backend, Supabase or Gemini:
 
 ```powershell
 Push-Location frontend
-npm.cmd ci
-Pop-Location
-```
-
-For local testing, start the backend so the phone can reach it (stop any older backend on that port first):
-
-```powershell
-.\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000 --no-access-log --ws none
-```
-
-Connect the phone and computer to the same trusted Wi-Fi. Find the computer's Wi-Fi IPv4 address with `ipconfig`. If needed, allow Python through Windows Firewall on the private network. The app reads the backend address from `EXPO_PUBLIC_API_URL` (normally set in `frontend/.env`; a PowerShell variable of the same name overrides it). Replace `192.168.1.100` below with your address:
-
-```powershell
-Push-Location frontend
-$env:EXPO_PUBLIC_API_URL = 'http://192.168.1.100:8000'
-npm.cmd start -- --lan
-```
-
-The address must be an origin only (no path such as `/health`). Open the QR code in an Expo Go version compatible with SDK 57. On a physical phone, `localhost` and `127.0.0.1` point to the phone, not the computer. For an Android emulator, the host is normally `10.0.2.2`.
-
-`EXPO_PUBLIC_API_URL` is a public backend address, not a secret. Never add Gemini credentials to the frontend. Restart Expo after changing the address. Requests time out after 90 seconds; buttons are disabled while a request is running. Errors preserve the selected image for retry; selecting a new image clears the old result.
-
-Frontend checks (from `frontend`):
-
-```powershell
 npm.cmd run typecheck
 npm.cmd test
 npm.cmd run build
+Pop-Location
 ```
 
-The build exports Android/iOS JavaScript and Hermes bundles plus a web preview into ignored `frontend/dist`; it does not produce an APK or IPA. Tests use mocked HTTP responses and do not call the backend or Gemini.
+The build exports JavaScript bundles into the ignored `frontend/dist`. It doesn't produce an APK or IPA.
 
-Optional layout preview: `npm.cmd run web`. The intended upload target is the native app; browser API requests would need backend CORS support, which is intentionally off.
+None of these tests checks live model quality or a real Supabase project.
+
+## 6. Evaluation
+
+`backend/evals/microscopy_eval.py` is a Braintrust harness for comparing prompt variants. It runs each image through the same `prepare_image` and Gemini path as production. Model fallback is turned off and the model is recorded with each run. The production prompt is never modified.
+
+Run it from `backend/`, with `GEMINI_API_KEY` set in `backend/.env` and Braintrust credentials available to the CLI:
+
+```powershell
+$env:SCOPEPILOT_EVAL_PROMPT_VARIANT = 'prompt-a-naive-baseline'
+.\.venv\Scripts\braintrust.exe eval evals/microscopy_eval.py
+```
+
+The variants are `prompt-a-naive-baseline`, `prompt-b-scopepilot-production`, `prompt-c-overconstrained` and `prompt-d-synthesized`.
+
+Read the results with care:
+- It is a pilot of five images. The labels are manual and have not been checked by an expert.
+- The scorers are a lexical specimen match, structure recall, schema validity and whether any limitation is listed.
+- A lexical match is not biological accuracy, since synonyms count as misses. Recall ignores extra or invented structures, and a valid schema says nothing about whether the content is true.
+- Five images say nothing about general performance.
+- The variant names in the recorded results differ from those in the code. See [docs/HANDOFF.md](docs/HANDOFF.md), sections 8 and 9, for the results and their limits.
+
+## 7. Known limitations
+
+- **Output can be wrong.** Gemini's output is tentative: it can misidentify a specimen, list structures that aren't visible, or explain things incorrectly. A valid response shape doesn't make it correct.
+- **No microscopy check.** Any valid image is analyzed, including one that isn't a microscopy image.
+- **Off-topic questions and prompt injection** (including text inside an image) are handled only by prompt instructions and output validation. There is no dedicated filter, and resistance is not guaranteed.
+- **Quiz answers reach the app.** The correct answers are sent with the questions, so a determined user can read them. The quiz is for practice, not assessment.
+- **Ask history isn't saved.** Follow-up answers aren't stored. Leaving the screen loses them.
+- **RAG isn't built.** Grounding explanations in trusted biology material is planned, not implemented.
+- **The deployed backend can't serve the logbook yet.** The public backend (https://scopepilot.onrender.com) answers `/v1` with 503 "Logbook not configured.", so the logbook currently works only against a local backend.
+- **Legacy routes are unprotected** until `LEGACY_API_ENABLED=false` is set on the host. Until then they have only global limits and no user accounts.
+- **Supabase's built-in email sender** allows only a few messages per hour. Custom SMTP must be configured before real users sign up.
+
+## 8. Project status and docs
+
+The backend's logbook API (`/v1`) is complete. On branch `feat/app-login-logbook`, the app has:
+- Supabase email and password accounts;
+- the logbook (create, list, open, edit, save, delete);
+- follow-up questions, quizzes and daily usage;
+- account deletion.
+
+The original single-screen analysis client has been removed from the app.
+
+The repository is at https://github.com/frappuo/ScopePilot.
+
+- [docs/HANDOFF.md](docs/HANDOFF.md): architecture, design decisions, endpoint details, what has been verified and where, known issues, evaluation results and next steps. It can lag the code; the code is the source of truth.
+- [CLAUDE.md](CLAUDE.md): working rules for this repository (commands, architecture rules, secrets and privacy, honesty rules).
