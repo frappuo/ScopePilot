@@ -7,6 +7,8 @@ import type { AuthAction } from './authState';
 // Account deletion: a password check, DELETE /v1/me, then a local sign-out with a notice.
 
 export const ENTER_PASSWORD = 'Enter your password.';
+// Only the email is known here, so the sign-in message ("Email or password is incorrect.") would mislead.
+export const WRONG_PASSWORD = 'That password is incorrect.';
 
 export type PasswordAuth = Pick<SupabaseClient['auth'], 'getSession' | 'signInWithPassword'>;
 
@@ -20,7 +22,10 @@ export async function verifyPassword(auth: PasswordAuth, password: string): Prom
     const user = data.session?.user;
     if (!user?.email) return { ok: false, code: 'session_not_found', message: MESSAGES.sessionEnded };
     const { data: checked, error } = await auth.signInWithPassword({ email: user.email, password });
-    if (error) return { ok: false, ...describeAuthError(error, 'verify_password') };
+    if (error) {
+      const failure = describeAuthError(error, 'verify_password');
+      return { ok: false, code: failure.code, message: failure.code === 'invalid_credentials' ? WRONG_PASSWORD : failure.message };
+    }
     if (checked.user?.id !== user.id) return { ok: false, code: null, message: GENERIC_MESSAGE };
     return { ok: true };
   } catch (error) {

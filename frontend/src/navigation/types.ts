@@ -19,6 +19,10 @@ export type RootStackParamList = {
   AskExperiment: { id: string };
   // A three-question quiz on one observation's analysis, by ID.
   QuizExperiment: { id: string };
+  // The signed-in email, sign out and account deletion.
+  Account: undefined;
+  // The password check and the deletion itself.
+  DeleteAccount: undefined;
 };
 
 export type ScreenProps<Name extends keyof RootStackParamList> = NativeStackScreenProps<RootStackParamList, Name>;

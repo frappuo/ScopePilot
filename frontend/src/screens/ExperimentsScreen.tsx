@@ -1,12 +1,11 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, RefreshControl } from 'react-native';
+import { RefreshControl } from 'react-native';
 import { dailyUsage, limitedUsage, useDailyUsage } from '../api/dailyUsage';
 import { ApiError, MESSAGES } from '../api/http';
 import { logbookChangedSince } from '../api/logbookChanges';
 import type { LogbookApi } from '../api/logbookApi';
 import { useLogbookApi } from '../api/useLogbookApi';
-import { useAuth } from '../auth/AuthProvider';
 import { showOptionsMenu } from '../components/optionsMenu';
 import {
   Button, EmptyState, IconButton, ListGroup, ListRow, ListThumbnail, Loading, Notice, Screen, ScreenHeading,
@@ -70,7 +69,6 @@ export type LogbookViewProps = {
   loading: boolean;
   refreshing: boolean;
   error: string | null;
-  busy: boolean;
   // Entries being deleted: shown dimmed and inactive until the delete finishes.
   pendingIds?: string[];
   onRefresh(): void;
@@ -85,7 +83,7 @@ export type LogbookViewProps = {
 };
 
 export function LogbookView({
-  data, usage, loading, refreshing, error, busy, pendingIds = [], onRefresh, onRetry, onOpen, onNew, onAccount,
+  data, usage, loading, refreshing, error, pendingIds = [], onRefresh, onRetry, onOpen, onNew, onAccount,
   onOptions, onEdit, onDelete,
 }: LogbookViewProps) {
   const { colors } = useTheme();
@@ -94,9 +92,9 @@ export function LogbookView({
   return <Screen edges={['top', 'bottom', 'left', 'right']} fill
     refreshControl={data ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh}
       tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.surface} /> : undefined}
-    footer={<Button size="large" title="New observation" onPress={onNew} disabled={busy} />}>
+    footer={<Button size="large" title="New observation" onPress={onNew} />}>
     <ScreenHeading title="Logbook" subtitle={formatLogbookDate(new Date())}
-      trailing={<IconButton glyph="account" accessibilityLabel="Account" onPress={onAccount} busy={busy} />} />
+      trailing={<IconButton glyph="account" accessibilityLabel="Account" onPress={onAccount} />} />
     {error ? <Notice kind="error">{error}</Notice> : null}
     {!data && loading ? <Loading /> : null}
     {!data && !loading && error ? <Button variant="secondary" title="Try again" onPress={onRetry} /> : null}
@@ -125,13 +123,11 @@ export function LogbookView({
 type LoadMode = 'initial' | 'refresh' | 'background';
 
 export default function ExperimentsScreen({ navigation }: ScreenProps<'Experiments'>) {
-  const { signOut } = useAuth();
   const api = useLogbookApi();
   const [data, setData] = useState<LogbookData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const usage = limitedUsage(useDailyUsage());
   const dataRef = useRef<LogbookData | null>(null);
@@ -175,20 +171,6 @@ export default function ExperimentsScreen({ navigation }: ScreenProps<'Experimen
     void dailyUsage.refreshIfStale(api);
   }, [load, api]));
 
-  async function handleSignOut() {
-    if (busy) return;
-    setBusy(true);
-    await signOut();
-    setBusy(false);
-  }
-
-  function openAccount() {
-    Alert.alert('Sign out?', undefined, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign out', style: 'destructive', onPress: handleSignOut },
-    ]);
-  }
-
   const edit = (id: string) => navigation.navigate('EditExperiment', { id });
 
   // The row stays, dimmed, while the delete runs. On success it goes at once and the list and tiles
@@ -207,12 +189,12 @@ export default function ExperimentsScreen({ navigation }: ScreenProps<'Experimen
 
   const confirmDelete = (id: string) => askToDelete(() => { void runDelete(id); });
 
-  return <LogbookView data={data} usage={usage} loading={loading} refreshing={refreshing} error={error} busy={busy}
+  return <LogbookView data={data} usage={usage} loading={loading} refreshing={refreshing} error={error}
     pendingIds={pendingIds}
     onRefresh={() => { void load('refresh'); void dailyUsage.refresh(api); }}
     onRetry={() => { void load('initial'); void dailyUsage.refreshIfStale(api); }}
     onOpen={id => navigation.navigate('Experiment', { id })}
-    onNew={() => navigation.navigate('NewExperiment')} onAccount={openAccount}
+    onNew={() => navigation.navigate('NewExperiment')} onAccount={() => navigation.navigate('Account')}
     onOptions={item => showOptionsMenu(menuActions({ onEdit: () => edit(item.id), onDelete: () => confirmDelete(item.id) }), entryTitle(item))}
     onEdit={edit} onDelete={confirmDelete} />;
 }

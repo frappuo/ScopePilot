@@ -137,6 +137,9 @@ test('a lost connection gives the network message', async () => {
   const error = await rejection(makeClient().api.request(readMe));
   assert.ok(error instanceof ApiError);
   assert.deepEqual([error.kind, error.message], ['network', MESSAGES.network]);
+  const deletion = await rejection(makeClient().api.request({ ...readMe, op: 'delete_account', method: 'DELETE' }));
+  assert.deepEqual([deletion.kind, deletion.message],
+    ['network', "Couldn't confirm the deletion. Check your connection and try again."]);
 });
 
 test('the deadline aborts the request; create gets its own timeout message', async () => {

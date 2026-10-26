@@ -77,6 +77,7 @@ export const MESSAGES = {
   aiTooSlow: "The AI took too long to respond. Please try again. This may have used one of today's AI requests.",
   accountDeleteUnfinished: "Account deletion didn't finish. Please try again.",
   accountDeleteTimeout: 'Account deletion is taking too long. Your account may have been deleted.',
+  accountDeleteNetwork: "Couldn't confirm the deletion. Check your connection and try again.",
   dailyLimit: (time: string) => `You've used today's AI requests. They reset at ${time}.`,
   serverLimit: (time: string) => `ScopePilot has reached today's AI request limit. Try again after ${time}.`,
 } as const;
@@ -290,7 +291,8 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
           if (caller?.aborted) throw aborted();
           const kind = controller.signal.aborted ? 'timeout' : 'network';
           diagnostic({ op: request.op, kind });
-          throw new ApiError(kind, null, kind === 'network' ? MESSAGES.network
+          throw new ApiError(kind, null, kind === 'network'
+            ? (request.op === 'delete_account' ? MESSAGES.accountDeleteNetwork : MESSAGES.network)
             : request.op === 'create' ? MESSAGES.createTimeout
             : request.op === 'ask' || request.op === 'quiz' ? MESSAGES.aiTimeout
             : request.op === 'delete_account' ? MESSAGES.accountDeleteTimeout

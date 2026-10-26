@@ -234,9 +234,11 @@ export function LinkButton({ title, onPress, disabled }: { title: string; onPres
   </Pressable>;
 }
 
-export function Notice({ kind, children }: { kind: NoticeKind; children: ReactNode }) {
+// `viewRef` makes the notice one focusable element, so a screen can move focus to it.
+export function Notice({ kind, children, viewRef }: { kind: NoticeKind; children: ReactNode; viewRef?: Ref<View> }) {
   const [styles, theme] = useUiStyles();
-  return <View accessibilityRole={kind === 'error' ? 'alert' : undefined} accessibilityLiveRegion="polite"
+  return <View ref={viewRef} accessible={viewRef ? true : undefined}
+    accessibilityRole={kind === 'error' ? 'alert' : undefined} accessibilityLiveRegion="polite"
     style={[styles.notice, styles[kind]]}>
     <Text maxFontSizeMultiplier={theme.type.body.maxFontSizeMultiplier}
       style={[styles.body, styles[NOTICE_TEXT[kind]]]}>{children}</Text>

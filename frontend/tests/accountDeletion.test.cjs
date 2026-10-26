@@ -12,11 +12,12 @@ const { authReducer, initialAuthState, gateFor } = loadTs('src/auth/authState.ts
 const { verifyPassword, deletionFailure, createAccountDeletion, ENTER_PASSWORD } = loadTs('src/auth/accountDeletion.ts', {
   '../api/http': http,
 });
+const { describeAuthError } = loadTs('src/auth/authErrors.ts');
 
 const EMAIL = 'student@example.com';
 const USER_ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const PASSWORD = 'dummy-password-for-tests';
-const WRONG = 'Email or password is incorrect.';
+const WRONG = 'That password is incorrect.';
 const usageFigures = { used_today: 3, daily_limit: 40, remaining: 37, resets_at: '2026-10-25T00:00:00Z' };
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -111,6 +112,9 @@ test('a wrong password gives the fixed message and keeps the session', async () 
   const result = await verifyPassword(auth, 'not-the-password');
   assert.deepEqual(result, { ok: false, code: 'invalid_credentials', message: WRONG });
   assert.equal(auth.stored.access_token, 'dummy-access-1');
+  // Sign-in keeps its own message.
+  assert.equal(describeAuthError(new AuthApiError('x', 400, 'invalid_credentials'), 'sign_in').message,
+    'Email or password is incorrect.');
 });
 
 test('a rate limit gives the fixed rate-limit message', async () => {
@@ -200,7 +204,7 @@ for (const [name, error] of Object.entries(maybeDeleted)) {
 }
 
 const kept = {
-  'a network failure': new ApiError('network', null, MESSAGES.network),
+  'a network failure': new ApiError('network', null, MESSAGES.accountDeleteNetwork),
   'an app-token 401': new ApiError('update_app', 401, MESSAGES.updateApp),
   'an unconfigured logbook': new ApiError('not_configured', 503, MESSAGES.notConfigured),
   'a sign-in check outage': new ApiError('unavailable', 503, MESSAGES.signInUnavailable),

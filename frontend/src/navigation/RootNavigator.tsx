@@ -4,7 +4,9 @@ import { useMemo } from 'react';
 import { useAuth } from '../auth/AuthProvider';
 import { gateFor } from '../auth/authState';
 import { Loading } from '../components/ui';
+import AccountScreen from '../screens/AccountScreen';
 import AskExperimentScreen from '../screens/AskExperimentScreen';
+import DeleteAccountScreen from '../screens/DeleteAccountScreen';
 import ConfigErrorScreen from '../screens/ConfigErrorScreen';
 import EditExperimentScreen from '../screens/EditExperimentScreen';
 import ExperimentScreen from '../screens/ExperimentScreen';
@@ -59,6 +61,10 @@ export default function RootNavigator() {
           options={{ title: 'Ask', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
         <Stack.Screen name="QuizExperiment" component={QuizExperimentScreen}
           options={{ title: 'Quiz', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="Account" component={AccountScreen}
+          options={{ title: 'Account', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
+        <Stack.Screen name="DeleteAccount" component={DeleteAccountScreen}
+          options={{ title: 'Delete account', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
       </>}
     </Stack.Navigator>
   </NavigationContainer>;

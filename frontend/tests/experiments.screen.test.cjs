@@ -187,10 +187,11 @@ test('a change on this device makes the list reload on its next focus', async ()
   assert.equal(changes.logbookChangedSince(1000), true);
 });
 
-test('Account is a 44 pt icon button that confirms before signing out', async () => {
+test('Account is a 44 pt icon button that navigates to Account', () => {
   alerts.length = 0;
   signOutCalls.length = 0;
-  const { hosts } = render('light', createElement(Experiments, { navigation: navigation() }));
+  const nav = navigation();
+  const { hosts } = render('light', createElement(Experiments, { navigation: nav }));
   const account = find(hosts, 'Pressable').find(entry => entry.props.accessibilityLabel === 'Account');
   assert.equal(account.props.accessibilityRole, 'button');
   assert.deepEqual(account.props.accessibilityState, { disabled: false, busy: false });
@@ -199,14 +200,9 @@ test('Account is a 44 pt icon button that confirms before signing out', async ()
   assert.ok(!find(hosts, 'Text').some(text => textOf(text) === 'Sign out'));
 
   account.props.onPress();
+  assert.deepEqual(nav.calls, [['Account']]);
+  assert.equal(alerts.length, 0);
   assert.equal(signOutCalls.length, 0);
-  assert.equal(alerts.length, 1);
-  const [title, message, buttons] = alerts[0];
-  assert.equal(title, 'Sign out?');
-  assert.equal(message, undefined);
-  assert.deepEqual(buttons.map(({ text, style }) => [text, style]), [['Cancel', 'cancel'], ['Sign out', 'destructive']]);
-  await buttons[1].onPress();
-  assert.equal(signOutCalls.length, 1);
 });
 
 test('loadLogbook loads only the list; usage comes from the shared store', async () => {
