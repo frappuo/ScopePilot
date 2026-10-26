@@ -20,8 +20,8 @@ The AI is assistive and tentative; the student remains responsible for verifying
 
 ### Implemented
 
--   React Native/Expo app (gallery selection only; no camera capture): analysis, follow-up Q&A (`/ask`), quiz (`/quiz`: exactly three questions, four options each).
--   FastAPI backend with Gemini; upload validation and re-encoding (section 5); structured, Pydantic-validated responses; the app shows the backend's `detail` for 400/413/415 only.
+-   On `main`: the original single-screen React Native/Expo client (photo library only; no camera capture) using the legacy `/analyze`, `/ask` and `/quiz` (quiz: exactly three questions, four options each). The branch below removes it and uses only `/v1`.
+-   FastAPI backend with Gemini; upload validation and re-encoding (section 5); structured, Pydantic-validated responses.
 -   Optional Gemini model fallback on quota or model-not-found (`GEMINI_FALLBACK_MODELS`); evals are pinned to the primary model.
 -   Request limits (body size, `/ask`/`/quiz` input caps, global daily Gemini cap) and an optional shared app token (`APP_TOKEN`; a deterrent, not authentication).
 -   Legacy switch (logbook PR 7): `LEGACY_API_ENABLED=false` answers `/analyze`, `/ask` and `/quiz` with 410 before any body is read (section 5). Default `true`; not yet flipped on Render.
@@ -33,12 +33,17 @@ The AI is assistive and tentative; the student remains responsible for verifying
 -   Stage 1: Supabase email and password accounts in the app, with sign-up and password recovery by 6-digit emailed code, sessions in SecureStore, a first-launch marker and native-stack navigation.
 -   Theme stage: `src/theme` design tokens ("Brightfield warm"), light/dark following the system, WCAG contrast tests.
 -   Composition stage: new layout primitives in `src/components/ui.tsx`; the auth screens and the Logbook placeholder are recomposed with them.
--   Analysis now sits behind sign-in but still calls the legacy `/analyze`, `/ask` and `/quiz`. The app makes no `/v1` calls yet, and the Logbook screen is a placeholder.
+-   Stage 2, logbook core (complete): create an observation from an image, list, open, edit, save and delete through `/v1`, plus long-press Edit/Delete on the list.
+-   Stage 3: experiment ask and quiz screens, and today's AI usage from a shared store (list tile, Detail "Ask and quiz" card).
+-   Stage 4: the Account screen (email, sign out, delete account), account deletion with a password check, removal of the legacy client and its tests, `.env.example` files for both folders, and the README rewrite.
+-   The app uses only `/v1`. Frontend typecheck and tests are run by the user per commit; counts are not tracked in this handoff.
 
 ### Verified on a physical device (user-reported)
 
 -   2026-10-03: analysis, Q&A, quiz, Live Photos, and PNG uploads verified on a physical iPhone against the deployed Render backend.
 -   Render deployment at `https://scopepilot.onrender.com`: per handoff and user report; not verifiable from the repository.
+-   Stage 2 logbook core (branch `feat/app-login-logbook`): verified on a physical iPhone through a local backend and a cloudflared quick tunnel (section 6, "Local device testing"), not against Render. HEIC photos work with the current picker settings; no representation mode change was needed.
+-   Stages 3 and 4 (ask, quiz, usage, Account, account deletion): device results are not recorded in this handoff yet. Record them here once checked.
 
 ### Incomplete or not verified
 
@@ -57,12 +62,10 @@ Do not describe planned features as implemented.
 
 ### Planned / not implemented
 
-None of the following exists in the code. The logbook backend PRs (1-7) are done, and the app's sign-in is on `feat/app-login-logbook`; remaining, in order:
+None of the following exists in the code. The logbook backend PRs (1-7) are done, and app stages 1-4 are on `feat/app-login-logbook`; remaining:
 
--   Stage 2: logbook core in the app (create from an image, list, open, rename, save, delete through `/v1`). Fix the auth 5xx message first (Known issues).
--   Stage 3: experiment ask, quiz and daily usage in the app.
--   Stage 4: account deletion in the app (`DELETE /v1/me`).
--   Removal of the legacy `AnalysisScreen` once the logbook replaces it; then update README.md and add a `frontend/.env.example`.
+-   Merge the branch, then the Render rollout in section 5 ("Legacy switch").
+-   Optional backend addition: a `structure_count` for the logbook list (`GET /v1/experiments`).
 -   Later assistant features: cross-experiment context, learning tracking.
 -   RAG over trusted biology material.
 
@@ -73,17 +76,27 @@ Also not implemented: per-user rate limiting on the legacy `/analyze`, `/ask` an
 -   CORS is intentionally off, so the browser preview cannot call the backend.
 -   No authentication or per-user rate limiting on the legacy API (body limits, input caps, a global daily cap, and an optional shared app token exist).
 -   The legacy `/ask` and `/quiz` trust the client-supplied analysis. The `/v1/experiments/{id}/ask` and `/quiz` routes read the stored analysis instead.
--   The two legacy items above stay open until `LEGACY_API_ENABLED=false` is set on Render (rollout in section 5, "Legacy switch"). The switch exists, but the app still uses the legacy routes.
+-   The two legacy items above stay open until `LEGACY_API_ENABLED=false` is set on Render (rollout in section 5, "Legacy switch"). The switch exists, and the branch's app uses only `/v1`.
 -   Reconcile eval variant names (section 8).
 -   Gemini's handling of 16-bit grayscale PNG is untested.
 -   The code default `GEMINI_MODEL` (`gemini-2.5-flash`) differs from `backend/.env.example` (`gemini-3.1-flash-lite`) and was recorded as unavailable to new users (`progress.md`).
--   `backend/.env.example` does not list `MAX_ENCODED_IMAGE_BYTES`.
--   A "server busy" 503 shows the app's generic 503 message, not the backend detail.
+-   A "server busy" 503 (decode lock) gets the app's generic message for that action (`frontend/src/api/http.ts`), not the backend detail.
 -   Real-device behavior of the decode lock and memory use on Render have not been measured.
--   App auth (branch `feat/app-login-logbook`): a 5xx from Supabase Auth shows the network-error message. Fix this first in stage 2.
--   Not verified on a device: the keyboard gap above the pinned footer on Face ID iPhones, the Android back button, the first-launch marker after a reinstall, session refresh after the access token expires, and the dark launch splash.
--   Render returns 503 on `/v1` (`SUPABASE_URL` and `SUPABASE_SECRET_KEY` unset there), so the logbook stages can only be tried against a local backend for now.
 -   During development the phone reaches Metro only through a tunnel (`--tunnel`), not over the LAN.
+
+Open items from stages 3-4 (one line each):
+
+-   Render returns 503 on `/v1`; check its `SUPABASE_URL`/`SUPABASE_SECRET_KEY`, migrations 0001-0002 and the start command.
+-   Optional backend `structure_count` for the logbook list.
+-   After an ambiguous deletion failure (route 503, timeout, 5xx, bad response), check `auth.getUser()` before signing out instead of always signing out with "may have been deleted".
+-   Account deletion has only an app-side password check; a server-side recent-sign-in requirement for `DELETE /v1/me` is not implemented.
+-   If deletion fails after the Auth user step, images uploaded meanwhile can stay as orphans; no sweeper exists.
+-   Quiz answers (`correct_answer`) are sent to the client with the questions.
+-   Ask history is not persisted; it lives only while the Ask screen is open.
+-   No in-app camera: images come from the photo library only.
+-   Unverified on a device from stage 1: keyboard gap above the pinned footer on Face ID iPhones, Android back button, first-launch marker after a reinstall, session refresh after token expiry, dark launch splash.
+-   `npm audit` findings in `frontend/` have not been reviewed.
+-   No `.gitattributes`: LF/CRLF line endings are not pinned, so Windows checkouts can show whole-file diffs.
 
 ## 3. Architecture
 
@@ -129,12 +142,12 @@ The `/v1` routes are the student logbook ("Student logbook" below); they need a 
 
 ### Request limits, app token, CORS
 
-Details in README.md. Not covered there:
-
+-   Body size (`body_limit` in `app/middleware.py`): `/analyze` and `/v1/experiments` allow `MAX_IMAGE_BYTES` + 64 KiB of multipart overhead; every other path allows `MAX_JSON_BODY_BYTES` (default 64 KiB); `/health` is exempt. A `Content-Length` over the limit gets 413 before anything is read; a chunked body is counted as it streams and gets 413 once it passes the limit.
+-   Analysis caps (`AnalysisInput` in `app/schemas/analysis.py`), applied to the analysis the legacy `/ask` and `/quiz` receive: `probable_specimen` ≤ 300 characters, `explanation` ≤ 6000, each list ≤ 40 items of ≤ 1000 characters; over a cap gives 422. `StoredAnalysis` (same file) applies the same caps plus 32 KiB of compact JSON to logbook analyses ("Student logbook" below). The legacy `/analyze` response is not capped.
 -   The daily Gemini cap (`GEMINI_DAILY_CALL_LIMIT`, default 100, counted just before each `generate_content` call, so fallbacks count) lives in process memory: it resets on restart and each worker process counts separately. Google's own quota reset time may differ from UTC midnight. Covered by mocked tests (`test_limits.py`); not verified on Render.
 -   Middleware order: Legacy -> AppToken -> Bearer -> BodySize (`app/main.py`). Never start the backend with `--root-path`: the middlewares match the raw request path, so a prefix would make them miss.
--   `APP_TOKEN` (`AppTokenMiddleware`, right after the legacy switch, `hmac.compare_digest`) is compiled into the app bundle via `EXPO_PUBLIC_APP_TOKEN`: a deterrent, **not authentication**. Rollout: ship the app, then set `APP_TOKEN` on Render, then confirm old builds get the 401 "update the app" message. Rejections log path and reason only. Not verified on Render or in a device build.
--   CORS is intentionally off: the native app does not need it, and CORS is not an abuse control.
+-   `APP_TOKEN` (`AppTokenMiddleware` in `app/middleware.py`, right after the legacy switch, `hmac.compare_digest`): when set, every path except `/health` (including `/docs`) needs the header `X-ScopePilot-Token` with the same value, or gets 401 `{"detail": "Unauthorized client."}` before the body is read; empty turns the check off. The app sends `EXPO_PUBLIC_APP_TOKEN` when set (`frontend/src/api/config.ts`). It is compiled into the app bundle: a deterrent, **not authentication**. Rollout: ship the app, then set `APP_TOKEN` on Render, then confirm old builds get the 401 "update the app" message. Rejections log path and reason only. Use dummy values in tests and docs. Not verified on Render or in a device build.
+-   CORS is intentionally off: the native app does not need it, and CORS is not an abuse control (it only restricts browsers). As a result the browser preview (`npm.cmd run web`) cannot call the API.
 
 ### Legacy switch (`LEGACY_API_ENABLED`, logbook PR 7, 2026-10-15)
 
@@ -148,8 +161,8 @@ Details in README.md. Not covered there:
 Rollout (each step verified before the next):
 
 1.  Deploy with the variable unset on Render. Verify: `/health` gives 200, and the current app on a phone can still analyze, ask and quiz against Render. Locally, run once with `LEGACY_API_ENABLED=false` and check with curl that each legacy path gives 410 with the detail and `/health` gives 200.
-2.  Prerequisites for `/v1` on Render: set `SUPABASE_URL` and `SUPABASE_SECRET_KEY` there (still unset, so `/v1` gives 503 on Render today), and configure custom SMTP in Supabase before real users sign up. Verify: `GET /v1/me` without a token gives 401, not 503.
-3.  Ship the app build that uses only `/v1` (the planned login and logbook screens). Verify on a physical device against Render: sign in, create, ask, quiz, list, delete. In the logs, in-app actions show only `/v1` lines; legacy lines come only from old builds.
+2.  Prerequisites for `/v1` on Render: set `SUPABASE_URL` and `SUPABASE_SECRET_KEY` there (`/v1` still gives 503 on Render today; checks in section 2, Known issues), and configure custom SMTP in Supabase before real users sign up. Verify: `GET /v1/me` without a token gives 401, not 503.
+3.  Ship the app build that uses only `/v1` (branch `feat/app-login-logbook`, stages 1-4). Verify on a physical device against Render: sign in, create, ask, quiz, list, delete. In the logs, in-app actions show only `/v1` lines; legacy lines come only from old builds.
 4.  Wait until the old builds you care about are updated; the legacy access-log lines show when callers have dropped off.
 5.  Set `LEGACY_API_ENABLED=false` on Render (an env change restarts the service). Verify: curl POST `/analyze`, `/ask` and `/quiz` each give 410 with the detail; `/health` gives 200; the new build still works end to end; an old build shows the update message (or the HTTP 410 fallback on builds made before the 410 mapping); the app log shows `rule=legacy_disabled` lines.
 6.  Rollback: set the variable back to `true` (or remove it) on Render. No migration and no data are involved.
@@ -170,11 +183,19 @@ Rollout (each step verified before the next):
 
 ### Upload pipeline (`prepare_image`, `services/images.py`)
 
-Steps are in README.md. iPhone camera JPEGs are detected by Pillow as `MPO` with two frames; before commit `d2ea65f` (2026-10-03) they got 415. MPO is now accepted as JPEG, first frame only. Limitations: 16-bit-per-channel RGB PNGs are reduced to 8 bits (only 16-bit grayscale round-trips); Gemini's handling of 16-bit PNG is untested; peak memory for a 20 MP image was roughly +170–340 MiB on Windows and has not been measured on Render.
+Summary of `prepare_image` (`backend/app/services/images.py`):
+
+1.  Rejects empty uploads (400), uploads over `MAX_IMAGE_BYTES` (413) and declared types other than `image/jpeg`, `image/png`, `image/webp` (415).
+2.  Reads only the header: the detected format must match the declared type (415), width × height must be within `MAX_IMAGE_PIXELS` (413; Pillow's decompression-bomb check also gives 413), and the image must have one frame (415), except MPO.
+3.  Decodes the first frame, applies EXIF orientation and re-encodes without EXIF/GPS, XMP, comments or PNG text chunks (the ICC profile is kept only when the mode is unchanged): JPEG/MPO → JPEG quality 95 (a deliberate second lossy encode); PNG → PNG, lossless, keeping mode, alpha, palette and 16-bit grayscale; WebP → WebP quality 95. No resizing.
+4.  Rejects re-encoded output over `MAX_ENCODED_IMAGE_BYTES` (413; default 14 MiB, under Gemini's inline limit as base64).
+5.  Decode lock: one decode/re-encode at a time (`_DECODE_SLOTS`, also used by `make_display_copies`); a request that waits more than 5 s gets 503 "Server is busy processing another image…". Corrupt images give 400. Rejections log the rule, declared type and detected format only.
+
+iPhone camera JPEGs are detected by Pillow as `MPO` with two frames; before commit `d2ea65f` (2026-10-03) they got 415. MPO is now accepted as JPEG, first frame only. Limitations: 16-bit-per-channel RGB PNGs are reduced to 8 bits (only 16-bit grayscale round-trips); Gemini's handling of 16-bit PNG is untested; peak memory for a 20 MP image was roughly +170–340 MiB on Windows and has not been measured on Render.
 
 ### Student logbook (PR 3 merged 2026-10-11 as #11, live-verified; PR 4 merged 2026-10-12 as #14 and PR 5 merged 2026-10-12 as #16, both live-verified locally; PR 6 account deletion live-verified locally 2026-10-14; PR 7 legacy switch done 2026-10-15, see "Legacy switch" above)
 
-Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. The backend part is done; the app's login is on branch `feat/app-login-logbook` (section 6) and its logbook screens are planned, not implemented. The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), answer questions and build quizzes from an experiment's stored analysis (PR 5), and delete the whole account (PR 6). The app's login and experiment screens do not exist yet.
+Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/rename/delete, and follow-up questions and quizzes on a stored experiment. The backend part is done, and the app side (login, logbook, ask, quiz, account deletion) is on branch `feat/app-login-logbook` (section 6). The backend verifies Supabase access tokens on every `/v1/*` route. It can create, read, list, edit, save and delete experiments (PR 3, PR 4), answer questions and build quizzes from an experiment's stored analysis (PR 5), and delete the whole account (PR 6).
 
 -   `POST /v1/experiments` (multipart `image`): validates and cleans the upload with `prepare_image`, analyzes it with Gemini, and stores it as a draft that expires after `DRAFT_TTL_HOURS`. Stored with it: a metadata-free JPEG display copy (long edge at most 2048 px), a 256 px thumbnail, the model that answered and a hash of the production prompt (`PROMPT_VERSION`). Returns 201 with the experiment and short-lived signed image URLs.
     -   Order: draft cap (409), `prepare_image`, display copies, the per-user daily quota (`consume_gemini_call`, 429 with `Retry-After`), Gemini, the stored-analysis cap, uploads, insert. A rejected image or a failed display copy costs no quota. An analysis over the `StoredAnalysis` caps gives 502 "Gemini returned an invalid or empty analysis" and stores nothing; the quota unit stays spent.
@@ -197,7 +218,7 @@ Slice 1: Supabase Auth login, saving an analysis as an experiment, list/open/ren
         4.  A final sweep, for images that a create still running may have uploaded meanwhile.
     -   `usage_daily` rows go by the `on delete cascade` with the Auth user. A deletion that fails earlier therefore keeps the day's quota count.
     -   Retries: a failed step stops the rest, and every step is safe to repeat. The access token stays valid until it expires, so a retry finishes a half-deleted account.
-    -   App contract: on 503, keep the session and retry `DELETE /v1/me`; sign out only on 204.
+    -   App behaviour (`frontend/src/auth/accountDeletion.ts`; section 6): 204 signs out with "Your account has been deleted."; a response that means the route ran or may have (its 503, a timeout, a 5xx other than 503, a malformed response) signs out with "may have been deleted"; anything refused before the route (middleware 503s, 401, network error) keeps the session for a retry. Signing out after an ambiguous failure differs from the original plan of keeping the session and retrying; see the `auth.getUser()` open item in section 2.
     -   Once the Auth user is gone, the foreign keys to `auth.users` reject any new row or quota use.
     -   No migration is needed. The row delete is small and indexed, well inside the 5 s `statement_timeout`, and the Auth delete runs inside Supabase Auth, not as `service_role`.
     -   Logs carry op names and counts only (`op=rows`, `op=objects`, `op=auth result=deleted|absent`, `op=final_sweep`).
@@ -242,7 +263,7 @@ Still unverified:
 
 -   Latency between Render and Supabase.
 -   Memory on Render for the second decode (the display copies) on each create.
--   The logbook on Render: `SUPABASE_URL` and `SUPABASE_SECRET_KEY` are not set there yet.
+-   The logbook on Render: `/v1` still gives 503 there (section 2, Known issues).
 -   The expired-draft purge and the 409 draft and saved caps were not exercised live.
 -   Account deletion from Render, and how long it takes there.
 
@@ -284,17 +305,36 @@ Free-tier caveats (from Supabase docs, 2026-10-07): projects pause after 7 days 
 
 ## 6. Frontend and deployment
 
-The app uploads the original picked file as multipart without converting or resizing it (`frontend/src/services/images.ts`; HEIC is rejected in the app). Error-message mapping is in README.md and `frontend/src/services/api.ts`. Last physical-iPhone check: 2026-10-03 against `https://scopepilot.onrender.com`.
+The app uploads the original picked file as multipart without converting or resizing it (`frontend/src/services/images.ts`; HEIC photos picked on an iPhone work with the current picker settings, device-verified in stage 2). Error messages are fixed texts in `frontend/src/api/http.ts` (`MESSAGES`); backend `detail` text is only matched to pick one, never shown. Auth error texts are in `frontend/src/auth/authErrors.ts`. The last physical-iPhone check against `https://scopepilot.onrender.com` (2026-10-03) used the legacy client on `main`.
 
-Lesson from an earlier config problem: a stale PowerShell `$env:EXPO_PUBLIC_API_URL` (`http://192.168.137.1:8000`) overrode `frontend/.env`. On a physical phone `localhost` is the phone; local testing needs a LAN address or tunnel, which the deployed HTTPS URL avoids.
+Lesson from an earlier config problem: a stale PowerShell `$env:EXPO_PUBLIC_API_URL` (`http://192.168.137.1:8000`) overrode `frontend/.env`. On a physical phone `localhost` is the phone; local testing uses the cloudflared tunnel below, which the deployed HTTPS URL avoids.
 
 ### App login and logbook (branch `feat/app-login-logbook`, not merged)
 
--   Stage 1, auth: Supabase email and password (`src/auth/`). Sign-up and password recovery are confirmed with a 6-digit emailed code (`verifyOtp`; code length and OTP types in `src/auth/policy.ts`). The session is stored in SecureStore, split into chunks because a session exceeds one SecureStore value (`sessionStorage.ts`). A first-launch marker in the app's documents folder clears stored auth on the first launch after a reinstall, since iOS keeps Keychain items after uninstall (`firstLaunch.ts`). Native-stack navigation (`src/navigation/`): signed out shows only the auth screens (sign in, sign up, enter code, forgot password, new password); signed in shows the Logbook and Analysis screens.
+-   Stage 1, auth: Supabase email and password (`src/auth/`). Sign-up and password recovery are confirmed with a 6-digit emailed code (`verifyOtp`; code length and OTP types in `src/auth/policy.ts`). The session is stored in SecureStore, split into chunks because a session exceeds one SecureStore value (`sessionStorage.ts`). A first-launch marker in the app's documents folder clears stored auth on the first launch after a reinstall, since iOS keeps Keychain items after uninstall (`firstLaunch.ts`). Native-stack navigation (`src/navigation/`): signed out shows only the auth screens (sign in, sign up, enter code, forgot password, new password); signed in shows the logbook screens.
 -   Theme stage: `src/theme` with design tokens ("Brightfield warm" palette, type, spacing, radius; `tokens.ts`), a `ThemeProvider` that follows the system light/dark setting, and a matching navigation theme. `expo-system-ui` sets the root background. WCAG AA contrast of every text pair is checked by `tests/theme.contrast.test.cjs`.
 -   Composition stage: new primitives in `src/components/ui.tsx`: `Screen` with a `footer` pinned above the keyboard (keyboard offset) and `fill`, `FieldGroup`/`FieldRow`/`PasswordRow`, `TextLink`, `InlinePrompt`, `IconButton`, `ScreenHeading`, `EmptyState`, `Spacer` and a large `Button` size. The auth screens and the Logbook placeholder are recomposed with them.
--   The Logbook screen is a placeholder (empty state, "Analyze an image" button, sign-out). Analysis is unchanged apart from theming and still uses the legacy routes.
--   Frontend tests: 216 (user-reported; mocked, no backend or Gemini). Run from `frontend/`: `npm.cmd run typecheck`, `npm.cmd test`, `npm.cmd run build`.
+-   Stage 2, logbook core (complete; device-verified on iPhone, user-reported, through a local backend and a cloudflared quick tunnel):
+    -   Part 0: a 5xx from Supabase Auth shows a server message (`src/auth/authErrors.ts`, keyed on status, not error class).
+    -   Commits 1-9: shared API config (`src/api/config.ts`); an http client (`src/api/http.ts`) that sends the app token and bearer token, shares a single 401 refresh across requests and ends the session once; a typed `logbookApi` that validates responses; list, tile, chip and pill primitives in `ui.tsx`; the logbook list, new observation, detail and edit screens (edit, save, delete); long-press Edit/Delete on list rows, also offered as VoiceOver actions.
+-   Stage 3, ask, quiz and usage:
+    -   Shared usage store (`src/api/dailyUsage.ts`): today's usage from `GET /v1/me`, a module store read with `useSyncExternalStore`, memory only, cleared on every user change. Screens refetch on focus once it is older than 60 s; after a create, ask or quiz that reached (or may have reached) the server it refetches, and a 429 marks the limit reached until the reset. `usage: null` from the backend shows no figures rather than "no limit".
+    -   The logbook list shows an "AI uses left today" tile. The Detail screen has an "Ask and quiz" card (`ExperimentScreen.tsx`): today's usage or the daily-limit warning, the cost line, and "Ask a question" / "Test your understanding", both disabled only when known usage is at 0. Drafts can be asked about and quizzed too.
+    -   Ask (`AskExperimentScreen.tsx`, `POST /v1/experiments/{id}/ask`): questions up to 500 characters with a counter; one request at a time; each question uses one AI request; exchanges live only while the screen is open.
+    -   Quiz (`QuizExperimentScreen.tsx`, `POST /v1/experiments/{id}/quiz`): one question at a time; the answer and explanation show only after a choice; the score at the end. Leaving a quiz in progress, or starting a new one, asks first, because a new quiz costs another request. The response carries the answers.
+    -   Both use `src/api/aiSession.ts` (double-submit guard, abort on leaving, usage refresh after each outcome) and the AI messages in `http.ts`, which say when a failure may have used a request.
+-   Stage 4, account and cleanup:
+    -   Account screen (`AccountScreen.tsx`, opened from the logbook's account icon): the session email if present, Sign out, and Delete account.
+    -   Delete account (`DeleteAccountScreen.tsx`): what is deleted (observations, their images, the account) and that it can't be undone; a password field; a destructive button disabled until a password is entered. While it runs, back and the button are disabled (`usePreventRemove`). Errors show a fixed message, take focus and keep the password.
+    -   Flow (`src/auth/accountDeletion.ts`, wired in `AuthProvider.tsx`): one deletion at a time; the password is checked by signing in again with the session's email (wrong password: "That password is incorrect."); then `DELETE /v1/me` with the confirmation phrase (`logbookApi.ts`, 100 s timeout). Outcomes: deleted (sign out, "Your account has been deleted."), maybe deleted (sign out, "Your account may have been deleted. Sign in to check."; see section 5 for which errors), or kept (still signed in, fixed message; e.g. a network error gives "Couldn't confirm the deletion. Check your connection and try again."). The sign-out clears today's usage and the logbook change time, retries once, removes the stored session and ends the session locally even if Supabase reports a failure. The notices are kept through the sign-out by `authState.ts` (`pendingNotice`).
+    -   Removed: the legacy single-screen client, its API service and its tests; the app has only `/v1` screens.
+    -   `frontend/.env.example` (the four `EXPO_PUBLIC_*` names, empty, with comments; checked by `tests/envExample.test.cjs`) and `MAX_ENCODED_IMAGE_BYTES` added to `backend/.env.example`.
+    -   README.md rewritten for the logbook app.
+-   Local device testing (the tunnel address changes every run):
+    1.  Run the backend on `127.0.0.1:8000` with `LEGACY_API_ENABLED=false` and a low `GEMINI_DAILY_CALL_LIMIT` while the tunnel is open.
+    2.  `cloudflared tunnel --url http://127.0.0.1:8000`, then set `EXPO_PUBLIC_API_URL` to the tunnel origin.
+    3.  Clear any `$env:EXPO_PUBLIC_API_URL` in the shell (it overrides `frontend/.env`), then from `frontend/`: `npx.cmd expo start -c --tunnel`.
+-   Frontend tests are mocked (no backend, Supabase or Gemini). Run from `frontend/`: `npm.cmd run typecheck`, `npm.cmd test`, `npm.cmd run build`.
 -   Open items are under "Known issues / follow-up tasks" in section 2; next stages under "Planned / not implemented".
 
 ## 7. Prompting, guardrails, and security
