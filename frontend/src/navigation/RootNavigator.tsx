@@ -4,7 +4,6 @@ import { useMemo } from 'react';
 import { useAuth } from '../auth/AuthProvider';
 import { gateFor } from '../auth/authState';
 import { Loading } from '../components/ui';
-import AnalysisScreen from '../screens/AnalysisScreen';
 import AskExperimentScreen from '../screens/AskExperimentScreen';
 import ConfigErrorScreen from '../screens/ConfigErrorScreen';
 import EditExperimentScreen from '../screens/EditExperimentScreen';
@@ -60,7 +59,6 @@ export default function RootNavigator() {
           options={{ title: 'Ask', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
         <Stack.Screen name="QuizExperiment" component={QuizExperimentScreen}
           options={{ title: 'Quiz', headerTitle: '', headerBackButtonDisplayMode: 'minimal' }} />
-        <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analyze an image' }} />
       </>}
     </Stack.Navigator>
   </NavigationContainer>;

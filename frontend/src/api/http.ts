@@ -20,14 +20,19 @@ export const DEFAULT_TIMEOUT_MS = 20_000;
 // each (SUPABASE_TIMEOUT_SECONDS), then one 60 s Gemini attempt: 80 s, plus a 10 s margin.
 // If fallbacks are set, use (1 + F) x 60 + 30 s.
 export const AI_TIMEOUT_MS = 90_000;
+// Account deletion (services/logbook.py delete_account): the row delete at 10 s, two storage
+// sweeps of up to 35 s each (SWEEP_BUDGET_SECONDS 25 plus one 10 s call started before the
+// deadline), and the Auth user delete at 10 s: 90 s, plus a 10 s margin.
+export const ACCOUNT_DELETE_TIMEOUT_MS = 100_000;
 
-export type ApiOp = 'create' | 'list' | 'read' | 'update' | 'delete' | 'me' | 'ask' | 'quiz';
+export type ApiOp = 'create' | 'list' | 'read' | 'update' | 'delete' | 'me' | 'ask' | 'quiz' | 'delete_account';
 
 // 'aborted': the caller cancelled the request (the screen left). It has no message to show.
+// 'unfinished': account deletion started on the server and stopped at a step the response doesn't name.
 export type ApiErrorKind =
   | 'configuration' | 'network' | 'timeout' | 'update_app' | 'session_ended' | 'not_found'
   | 'conflict' | 'invalid' | 'daily_limit' | 'server_limit' | 'not_configured' | 'unavailable'
-  | 'ai_busy' | 'bad_response' | 'aborted' | 'failed';
+  | 'ai_busy' | 'bad_response' | 'aborted' | 'unfinished' | 'failed';
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
@@ -70,6 +75,8 @@ export const MESSAGES = {
   aiBusy: "The AI service is busy right now. Please try again later. This may have used one of today's AI requests.",
   aiFailed: "The AI couldn't finish this request. Please try again. This may have used one of today's AI requests.",
   aiTooSlow: "The AI took too long to respond. Please try again. This may have used one of today's AI requests.",
+  accountDeleteUnfinished: "Account deletion didn't finish. Please try again.",
+  accountDeleteTimeout: 'Account deletion is taking too long. Your account may have been deleted.',
   dailyLimit: (time: string) => `You've used today's AI requests. They reset at ${time}.`,
   serverLimit: (time: string) => `ScopePilot has reached today's AI request limit. Try again after ${time}.`,
 } as const;
@@ -82,6 +89,7 @@ const NOT_CONFIGURED = 'Logbook not configured.';
 const SIGN_IN_UNAVAILABLE = 'Sign-in is temporarily unavailable.';
 const TITLE_REQUIRED = 'A title is required to save.';
 const ANALYSIS_TOO_LONG = "This experiment's analysis is too long for follow-up questions.";
+const DELETE_UNFINISHED = 'Account deletion did not finish. Please try again.';
 
 export type UploadFile = { uri: string; mimeType: string };
 
@@ -204,7 +212,7 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
     const create = op === 'create';
     const ai = op === 'ask' || op === 'quiz';
     if (status === 401) return new ApiError('update_app', status, MESSAGES.updateApp);
-    if (status === 404) return new ApiError('not_found', status, MESSAGES.notFound);
+    if (status === 404) return new ApiError('not_found', status, op === 'delete_account' ? MESSAGES.failed : MESSAGES.notFound);
     if (status === 409) {
       const message = create ? MESSAGES.tooManyDrafts : op === 'update' ? MESSAGES.tooManySaved : MESSAGES.failed;
       return new ApiError('conflict', status, message);
@@ -235,6 +243,10 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
     }
     if (status === 503 && text === NOT_CONFIGURED) return new ApiError('not_configured', status, MESSAGES.notConfigured);
     if (status === 503 && text === SIGN_IN_UNAVAILABLE) return new ApiError('unavailable', status, MESSAGES.signInUnavailable);
+    // The route's only failure (routes/me.py:36-38), whichever deletion step stopped.
+    if (op === 'delete_account' && status === 503 && text === DELETE_UNFINISHED) {
+      return new ApiError('unfinished', status, MESSAGES.accountDeleteUnfinished);
+    }
     // Ask and quiz charge the quota before Gemini (services/logbook.py _followup_analysis), so a
     // Gemini busy (503), failure (502) or timeout (504) has usually used a request. A proxy in
     // front of the backend can also return 502 or 504 before the request arrives.
@@ -281,6 +293,7 @@ export function createApiClient({ getAccessToken, onSessionEnded, now = Date.now
           throw new ApiError(kind, null, kind === 'network' ? MESSAGES.network
             : request.op === 'create' ? MESSAGES.createTimeout
             : request.op === 'ask' || request.op === 'quiz' ? MESSAGES.aiTimeout
+            : request.op === 'delete_account' ? MESSAGES.accountDeleteTimeout
             : MESSAGES.timeout);
         }
         diagnostic({ op: request.op, status: response.status });

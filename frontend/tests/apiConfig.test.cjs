@@ -1,4 +1,4 @@
-// Shared API configuration (src/api/config.ts), used by the /v1 client in src/api/http.ts.
+// API configuration (src/api/config.ts), used by the /v1 client in src/api/http.ts.
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { loadTs } = require('./helpers/loadTs.cjs');
@@ -30,7 +30,11 @@ test('the backend address is trimmed and reduced to its origin', () => {
 for (const address of ['http://', 'http://localhost:8000/health', 'http://localhost:8000/analyze', 'http://localhost:8000?value=test', 'http://user:placeholder@localhost:8000']) {
   test(`rejects invalid base address ${address}`, () => {
     process.env.EXPO_PUBLIC_API_URL = address;
-    assert.throws(() => resolveApiUrl(), /Invalid backend address/);
+    assert.throws(() => resolveApiUrl(), error => {
+      assert.equal(error.message,
+        'Invalid backend address. Use only the origin, such as http://<computer-ip>:8000, with no path, query or credentials.');
+      return true;
+    });
   });
 }
 

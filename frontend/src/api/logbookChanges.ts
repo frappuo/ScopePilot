@@ -9,3 +9,8 @@ export function noteLogbookChanged(now = Date.now()): void {
 export function logbookChangedSince(time: number): boolean {
   return changedAt > 0 && changedAt >= time;
 }
+
+// After the account is deleted: nothing carries over to the next sign-in.
+export function resetLogbookChanges(): void {
+  changedAt = 0;
+}

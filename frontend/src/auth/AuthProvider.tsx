@@ -1,11 +1,14 @@
 import { isAuthRetryableFetchError, type SupabaseClient } from '@supabase/supabase-js';
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 import { AppState, Platform } from 'react-native';
+import { dailyUsage } from '../api/dailyUsage';
+import { resetLogbookChanges } from '../api/logbookChanges';
 import type { SupabaseConfig } from '../config/env';
+import { createAccountDeletion, verifyPassword, type AccountDeletionResult } from './accountDeletion';
 import { describeAuthError } from './authErrors';
 import { authReducer, initialAuthState, type AuthState } from './authState';
 import { OTP_TYPES } from './policy';
-import { getSupabase } from './supabase';
+import { clearStoredSession, getSupabase } from './supabase';
 
 export type AuthResult = { ok: true } | { ok: false; code: string | null; message: string };
 
@@ -28,6 +31,8 @@ type AuthContextValue = {
   cancelRecovery(): Promise<void>;
   signOut(): Promise<void>;
   endSession(): Promise<void>;
+  // Checks the password, then sends the logbook API's deleteAccount (send). One at a time.
+  deleteAccount(password: string, send: () => Promise<void>): Promise<AccountDeletionResult>;
   clearNotice(): void;
   getAccessToken(forceRefresh?: boolean): Promise<AccessTokenResult>;
 };
@@ -191,6 +196,30 @@ export function AuthProvider({ config, children }: { config: SupabaseConfig; chi
     } catch (error) { describeAuthError(error, 'end_session'); }
   }, []);
 
+  // One instance per provider, so its one-at-a-time guard covers every screen.
+  const deleteAccount = useMemo(() => createAccountDeletion({
+    verifyPassword: async password => {
+      const auth = clientRef.current?.auth;
+      return auth ? verifyPassword(auth, password) : NOT_READY;
+    },
+    dispatch,
+    signOutLocal: async () => {
+      const auth = clientRef.current?.auth;
+      if (!auth) return false;
+      try {
+        const { error } = await auth.signOut({ scope: 'local' });
+        if (!error) return true;
+        describeAuthError(error, 'delete_account_sign_out');
+      } catch (error) { describeAuthError(error, 'delete_account_sign_out'); }
+      return false;
+    },
+    clearStoredSession,
+    clearLocalData: () => {
+      dailyUsage.clear();
+      resetLogbookChanges();
+    },
+  }), []);
+
   const clearNotice = useCallback(() => dispatch({ type: 'notice_cleared' }), []);
 
   const getAccessToken = useCallback(async (forceRefresh = false): Promise<AccessTokenResult> => {
@@ -215,9 +244,9 @@ export function AuthProvider({ config, children }: { config: SupabaseConfig; chi
 
   const value = useMemo<AuthContextValue>(() => ({
     state, clientError, signIn, signUp, verifySignUp, resendSignUp, requestPasswordReset,
-    verifyRecovery, setNewPassword, cancelRecovery, signOut, endSession, clearNotice, getAccessToken,
+    verifyRecovery, setNewPassword, cancelRecovery, signOut, endSession, deleteAccount, clearNotice, getAccessToken,
   }), [state, clientError, signIn, signUp, verifySignUp, resendSignUp, requestPasswordReset,
-    verifyRecovery, setNewPassword, cancelRecovery, signOut, endSession, clearNotice, getAccessToken]);
+    verifyRecovery, setNewPassword, cancelRecovery, signOut, endSession, deleteAccount, clearNotice, getAccessToken]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

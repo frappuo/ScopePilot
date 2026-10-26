@@ -117,6 +117,18 @@ test('sign in: the session notice sits under the field card', () => {
   assert.ok(notice < html.indexOf('Forgot password?'));
 });
 
+test('sign in: the account deletion notices', () => {
+  for (const [notice, text] of [
+    ['account_deleted', 'Your account has been deleted.'],
+    ['account_maybe_deleted', 'Your account may have been deleted. Sign in to check.'],
+  ]) {
+    auth.state.notice = notice;
+    const { html } = render('light', createElement(SignIn, { navigation: navigation() }));
+    auth.state.notice = null;
+    assert.ok(html.includes(text));
+  }
+});
+
 test('sign up: inline sign-in prompt replaces the old link, two password toggles', () => {
   const nav = navigation();
   const element = createElement(SignUp, { navigation: nav });

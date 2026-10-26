@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { loadTs } = require('./helpers/loadTs.cjs');
 
 let nativeUpload;
-const { createApiClient, ApiError, MESSAGES, CREATE_TIMEOUT_MS, AI_TIMEOUT_MS } = loadTs('src/api/http.ts', {
+const { createApiClient, ApiError, MESSAGES, CREATE_TIMEOUT_MS, AI_TIMEOUT_MS, ACCOUNT_DELETE_TIMEOUT_MS } = loadTs('src/api/http.ts', {
   'expo-file-system': {
     File: class {
       constructor(uri) { this.uri = uri; }
@@ -182,6 +182,16 @@ test('ask and quiz get their own timeout message, which warns about another requ
   }
 });
 
+test('account deletion has its own deadline and timeout message', async () => {
+  // Rows, two storage sweeps (25 s budget plus one 10 s call each), the Auth user, a margin.
+  assert.equal(ACCOUNT_DELETE_TIMEOUT_MS, (10 + 35 + 10 + 35 + 10) * 1000);
+  global.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  });
+  const error = await rejection(makeClient().api.request({ ...readMe, op: 'delete_account', method: 'DELETE', timeoutMs: 10 }));
+  assert.deepEqual([error.kind, error.message], ['timeout', MESSAGES.accountDeleteTimeout]);
+});
+
 test('a caller abort ends the request as aborted, with no message and no timeout', async () => {
   let started = 0;
   global.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
@@ -229,6 +239,7 @@ const TOO_LONG = "This experiment's analysis is too long for follow-up questions
 const DAILY_LIMIT = 'Daily AI request limit reached for your account. Try again after 00:00 UTC.';
 const SERVER_LIMIT = 'Daily Gemini request limit for this server reached. Try again after 00:00 UTC.';
 const GEMINI_BUSY = 'Gemini quota or rate limit reached. Try again later.';
+const DELETE_UNFINISHED = 'Account deletion did not finish. Please try again.';
 
 // [op, status, detail, headers, kind, message]
 const cases = [
@@ -284,6 +295,18 @@ const cases = [
   ['quiz', 503, 'Gemini API key is not configured on the backend.', {}, 'unavailable', MESSAGES.unavailable],
   ['ask', 500, SECRET, {}, 'unavailable', MESSAGES.unavailable],
   ['quiz', 503, 'Logbook not configured.', {}, 'not_configured', MESSAGES.notConfigured],
+  // Account deletion (backend/app/routes/me.py, middleware.py).
+  ['delete_account', 503, DELETE_UNFINISHED, {}, 'unfinished', MESSAGES.accountDeleteUnfinished],
+  ['delete_account', 503, 'Logbook not configured.', {}, 'not_configured', MESSAGES.notConfigured],
+  ['delete_account', 503, 'Sign-in is temporarily unavailable.', { 'retry-after': '30' }, 'unavailable', MESSAGES.signInUnavailable],
+  ['delete_account', 503, SECRET, {}, 'unavailable', MESSAGES.unavailable],
+  ['delete_account', 500, SECRET, {}, 'unavailable', MESSAGES.unavailable],
+  ['delete_account', 502, SECRET, {}, 'unavailable', MESSAGES.unavailable],
+  ['delete_account', 401, 'Unauthorized client.', {}, 'update_app', MESSAGES.updateApp],
+  ['delete_account', 422, [{ loc: ['body', 'confirm'], msg: SECRET }], {}, 'invalid', MESSAGES.failed],
+  ['delete_account', 404, 'Not Found', {}, 'not_found', MESSAGES.failed],
+  // The deletion text means nothing outside account deletion.
+  ['me', 503, DELETE_UNFINISHED, {}, 'unavailable', MESSAGES.unavailable],
 ];
 
 for (const [op, status, detail, headers, kind, message] of cases) {

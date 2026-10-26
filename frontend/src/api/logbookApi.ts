@@ -4,7 +4,9 @@ import type {
 } from '../types/experiment';
 import type { Quiz, QuizQuestion } from '../types/quiz';
 import { isAnalysis } from './config';
-import { AI_TIMEOUT_MS, ApiError, CREATE_TIMEOUT_MS, MESSAGES, type ApiClient, type UploadFile } from './http';
+import {
+  ACCOUNT_DELETE_TIMEOUT_MS, AI_TIMEOUT_MS, ApiError, CREATE_TIMEOUT_MS, MESSAGES, type ApiClient, type UploadFile,
+} from './http';
 
 // Typed calls for the /v1 logbook endpoints (backend/app/routes/experiments.py and me.py).
 // Every response is checked field by field and only the known fields are copied, so nothing
@@ -171,6 +173,14 @@ export function parseQuiz(value: unknown): Quiz | null {
   return { questions: [a, b, c] };
 }
 
+// AccountDeleteRequest (backend/app/schemas/me.py:24-29): this exact phrase, nothing else.
+export const ACCOUNT_DELETE_CONFIRM = 'DELETE MY ACCOUNT';
+
+// Only an empty 204 means the account is gone; any other success is a bad response.
+function parseNoContent(body: unknown): undefined | null {
+  return body === undefined ? undefined : null;
+}
+
 type ExperimentOp = 'read' | 'update' | 'delete' | 'ask' | 'quiz';
 
 // A non-UUID ID is rejected here, as the backend would with a 404, without a request.
@@ -246,6 +256,16 @@ export function createLogbookApi(client: ApiClient) {
 
     getMe(): Promise<Me> {
       return client.request({ op: 'me', method: 'GET', path: '/v1/me', parse: parseMe });
+    },
+
+    // DELETE /v1/me (backend/app/routes/me.py:27-39): the logbook, the images and the sign-in
+    // account. Every step is safe to repeat. Call it through the auth layer's deleteAccount,
+    // which checks the password first and signs out afterwards.
+    async deleteAccount(): Promise<void> {
+      await client.request({
+        op: 'delete_account', method: 'DELETE', path: '/v1/me', json: { confirm: ACCOUNT_DELETE_CONFIRM },
+        timeoutMs: ACCOUNT_DELETE_TIMEOUT_MS, parse: parseNoContent,
+      });
     },
 
     // One AI request from today's quota; nothing is stored. An empty or too long question is

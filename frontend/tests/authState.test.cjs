@@ -78,6 +78,41 @@ test('cancelling recovery signs out and clears the pending flag', () => {
   assert.equal(state.notice, null);
 });
 
+const user = (id, token = 'dummy-access') => ({ ...session, access_token: token, user: { id } });
+
+test('a finished or maybe-finished account deletion signs out with its own notice', () => {
+  for (const notice of ['account_deleted', 'account_maybe_deleted']) {
+    let state = run(event('INITIAL_SESSION', session), { type: 'account_deletion_started' });
+    assert.equal(state.deletingAccount, true);
+    state = authReducer(state, { type: 'account_deletion_ended', notice });
+    assert.equal(gateFor(state), 'app');
+    assert.equal(state.notice, null);
+    state = authReducer(state, event('SIGNED_OUT'));
+    assert.deepEqual([state.status, state.notice, state.deletingAccount, state.pendingNotice, state.signOutRequested],
+      ['signedOut', notice, false, null, false]);
+    // A second SIGNED_OUT (the real one after a forced sign-out) keeps the notice.
+    assert.equal(authReducer(state, event('SIGNED_OUT')).notice, notice);
+  }
+});
+
+test('a deletion that failed before deleting anything clears the flag and keeps the session', () => {
+  const state = run(event('INITIAL_SESSION', session), { type: 'account_deletion_started' }, { type: 'account_deletion_failed' });
+  assert.deepEqual([state.status, state.deletingAccount, state.notice, gateFor(state)], ['signedIn', false, null, 'app']);
+});
+
+test('the same user signing in again keeps the notice and the flags; another user clears the notice', () => {
+  const start = { ...run(event('INITIAL_SESSION', user('user-1'))), deletingAccount: true, notice: 'session_ended' };
+  const same = authReducer(start, event('SIGNED_IN', user('user-1', 'dummy-access-2')));
+  assert.deepEqual({ ...same, session: null }, { ...start, session: null });
+  assert.equal(same.session.access_token, 'dummy-access-2');
+  assert.equal(authReducer(start, event('SIGNED_IN', user('user-2'))).notice, null);
+});
+
+test('an unrequested sign-out during a deletion still shows the session-ended notice', () => {
+  const state = run(event('INITIAL_SESSION', session), { type: 'account_deletion_started' }, event('SIGNED_OUT'));
+  assert.deepEqual([state.status, state.notice, state.deletingAccount], ['signedOut', 'session_ended', false]);
+});
+
 test('signing in clears an old notice', () => {
   const state = run(event('INITIAL_SESSION', session), event('SIGNED_OUT'), event('SIGNED_IN', session));
   assert.equal(state.notice, null);

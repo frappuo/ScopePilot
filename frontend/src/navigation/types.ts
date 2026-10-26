@@ -19,8 +19,6 @@ export type RootStackParamList = {
   AskExperiment: { id: string };
   // A three-question quiz on one observation's analysis, by ID.
   QuizExperiment: { id: string };
-  // The pre-logbook analysis screen, removed once the logbook screens replace it.
-  Analysis: undefined;
 };
 
 export type ScreenProps<Name extends keyof RootStackParamList> = NativeStackScreenProps<RootStackParamList, Name>;

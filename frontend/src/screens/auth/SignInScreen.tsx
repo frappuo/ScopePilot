@@ -8,6 +8,8 @@ import type { ScreenProps } from '../../navigation/types';
 
 const NOTICES = {
   session_ended: 'Your session has ended. Please sign in again.',
+  account_deleted: 'Your account has been deleted.',
+  account_maybe_deleted: 'Your account may have been deleted. Sign in to check.',
 } as const;
 
 export default function SignInScreen({ navigation }: ScreenProps<'SignIn'>) {

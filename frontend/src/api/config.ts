@@ -16,11 +16,12 @@ export function resolveApiUrl(): string {
     return url.origin;
   } catch {
     diagnostic({ category: 'configuration_invalid' });
-    throw new Error('Invalid backend address. Use only http://<computer-ip>:8000, without /health or /analyze.');
+    throw new Error('Invalid backend address. Use only the origin, such as http://<computer-ip>:8000, with no path, query or credentials.');
   }
 }
 
-export function diagnostic(details: { baseUrl?: string; endpoint?: string; status?: number; category?: string; uriScheme?: string; mimeType?: string; hasFileName?: boolean; fileSize?: number }) {
+// Logs only the category, never the configured value.
+function diagnostic(details: { category: 'configuration_missing' | 'configuration_invalid' }) {
   if (typeof __DEV__ !== 'undefined' && __DEV__) console.info('[ScopePilot API]', details);
 }
 

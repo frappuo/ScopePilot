@@ -4,10 +4,10 @@ const { loadTs } = require('./helpers/loadTs.cjs');
 
 // logbookApi.ts gets this http module as its './http', so ApiError instanceof checks agree.
 const http = loadTs('src/api/http.ts', { 'expo-file-system': { File: class {}, UploadType: { MULTIPART: 1 } } });
-const { ApiError, MESSAGES, CREATE_TIMEOUT_MS, AI_TIMEOUT_MS } = http;
+const { ApiError, MESSAGES, CREATE_TIMEOUT_MS, AI_TIMEOUT_MS, ACCOUNT_DELETE_TIMEOUT_MS } = http;
 const {
   createLogbookApi, parseExperiment, parseSummary, parsePage, parseMe, isUuid, PAGE_LIMIT, MAX_PAGES,
-  parseAnswer, parseQuiz, stripLikePython, questionLength, QUESTION_MAX,
+  parseAnswer, parseQuiz, stripLikePython, questionLength, QUESTION_MAX, ACCOUNT_DELETE_CONFIRM,
 } = loadTs('src/api/logbookApi.ts', { './http': http });
 
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
@@ -185,6 +185,21 @@ test('getMe reads /v1/me', async () => {
   const { api, requests } = fakeClient([{ user_id: ID, email: 'student@example.com', usage: null }]);
   assert.deepEqual(await api.getMe(), { user_id: ID, usage: null });
   assert.deepEqual([requests[0].op, requests[0].method, requests[0].path], ['me', 'GET', '/v1/me']);
+});
+
+test('deleteAccount sends DELETE /v1/me with the confirmation phrase and its own deadline', async () => {
+  const { api, requests } = fakeClient([undefined]);
+  assert.equal(await api.deleteAccount(), undefined);
+  const [request] = requests;
+  assert.deepEqual([request.op, request.method, request.path, request.json, request.timeoutMs],
+    ['delete_account', 'DELETE', '/v1/me', { confirm: 'DELETE MY ACCOUNT' }, ACCOUNT_DELETE_TIMEOUT_MS]);
+  assert.equal(ACCOUNT_DELETE_CONFIRM, 'DELETE MY ACCOUNT');
+});
+
+test('only an empty 204 counts as a finished deletion', async () => {
+  const { api } = fakeClient([{ deleted: true }, new ApiError('unfinished', 503, MESSAGES.accountDeleteUnfinished)]);
+  assert.equal((await api.deleteAccount().catch(e => e)).kind, 'bad_response');
+  assert.equal((await api.deleteAccount().catch(e => e)).kind, 'unfinished');
 });
 
 const question = (text, options = ['Cell wall', 'Nucleus', 'Chloroplast', 'Vacuole'], correct = 'Cell wall') => ({

@@ -21,16 +21,20 @@ function installMarker(): InstallMarker {
 }
 
 let pending: Promise<SupabaseClient> | null = null;
+let authStorage: SessionStorage | null = null;
+
+async function removeStoredAuth(storage: SessionStorage): Promise<void> {
+  await storage.removeItem(AUTH_STORAGE_KEY);
+  await storage.removeItem(`${AUTH_STORAGE_KEY}-code-verifier`);
+}
 
 async function createAuthClient(config: SupabaseConfig): Promise<SupabaseClient> {
   const native = Platform.OS === 'ios' || Platform.OS === 'android';
   const storage: SessionStorage = native ? createChunkedStorage(SecureStore) : createMemoryStorage();
+  authStorage = storage;
   if (native) {
     // Must finish before createClient, which reads the stored session immediately.
-    await clearAuthOnFirstLaunch(installMarker(), async () => {
-      await storage.removeItem(AUTH_STORAGE_KEY);
-      await storage.removeItem(`${AUTH_STORAGE_KEY}-code-verifier`);
-    });
+    await clearAuthOnFirstLaunch(installMarker(), () => removeStoredAuth(storage));
   }
   return createClient(config.url, config.publishableKey, {
     auth: {
@@ -47,4 +51,13 @@ async function createAuthClient(config: SupabaseConfig): Promise<SupabaseClient>
 export function getSupabase(config: SupabaseConfig): Promise<SupabaseClient> {
   pending ??= createAuthClient(config);
   return pending;
+}
+
+// Removes the stored session without the client, after an account deletion whose local sign-out
+// failed. The client reads storage on each getSession, so it then has no session either. The
+// first-launch marker is left alone. Never throws.
+export async function clearStoredSession(): Promise<void> {
+  if (!authStorage) return;
+  try { await removeStoredAuth(authStorage); }
+  catch { if (typeof __DEV__ !== 'undefined' && __DEV__) console.info('[ScopePilot auth]', { category: 'clear_failed' }); }
 }

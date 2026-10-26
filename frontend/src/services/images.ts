@@ -25,6 +25,5 @@ export async function selectImage(): Promise<SelectedImage | null> {
     fileSize: asset.fileSize,
     name: asset.fileName || `microscopy.${mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]}`,
     type: mime,
-    blob: asset.file, // Only supplied by ImagePicker on web.
   };
 }

@@ -6,10 +6,6 @@ export type Analysis = {
   limitations: string[];
 };
 
-export type AskResponse = {
-  answer: string;
-};
-
 export type SelectedImage = {
   uri: string;
   name: string;
@@ -17,5 +13,4 @@ export type SelectedImage = {
   fileName?: string | null;
   mimeType?: string;
   fileSize?: number;
-  blob?: Blob;
 };
