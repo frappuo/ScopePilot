@@ -1,4 +1,18 @@
 {
   "version": 1,
-  "sources": []
+  "sources": [
+    {"key": "plant-cell", "url": "https://en.wikipedia.org/wiki/Plant_cell", "topic": "plant-cells", "licence": "CC BY-SA 4.0"},
+    {"key": "epidermis-botany", "url": "https://en.wikipedia.org/wiki/Epidermis_(botany)", "topic": "plant-tissues", "licence": "CC BY-SA 4.0"},
+    {"key": "ground-tissue", "url": "https://en.wikipedia.org/wiki/Ground_tissue", "topic": "plant-tissues", "licence": "CC BY-SA 4.0"},
+    {"key": "vascular-tissue", "url": "https://en.wikipedia.org/wiki/Vascular_tissue", "topic": "plant-tissues", "licence": "CC BY-SA 4.0"},
+    {"key": "red-blood-cell", "url": "https://en.wikipedia.org/wiki/Red_blood_cell", "topic": "blood-cells", "licence": "CC BY-SA 4.0"},
+    {"key": "white-blood-cell", "url": "https://en.wikipedia.org/wiki/White_blood_cell", "topic": "blood-cells", "licence": "CC BY-SA 4.0"},
+    {"key": "blood-smear", "url": "https://en.wikipedia.org/wiki/Blood_smear", "topic": "blood-cells", "licence": "CC BY-SA 4.0"},
+    {"key": "saccharomyces-cerevisiae", "url": "https://en.wikipedia.org/wiki/Saccharomyces_cerevisiae", "topic": "yeast", "licence": "CC BY-SA 4.0"},
+    {"key": "kaiser-yeasts", "url": "https://bio.libretexts.org/Bookshelves/Microbiology/Microbiology_(Kaiser)/Unit_4%3A_Eukaryotic_Microorganisms_and_Viruses/08%3A_Fungi/8.2%3A_Yeasts", "topic": "yeast", "licence": "CC BY 4.0", "author": "Gary Kaiser"},
+    {"key": "stratified-squamous-epithelium", "url": "https://en.wikipedia.org/wiki/Stratified_squamous_epithelium", "topic": "epithelium", "licence": "CC BY-SA 4.0"},
+    {"key": "oral-mucosa", "url": "https://en.wikipedia.org/wiki/Oral_mucosa", "topic": "epithelium", "licence": "CC BY-SA 4.0"},
+    {"key": "optical-microscope", "url": "https://en.wikipedia.org/wiki/Optical_microscope", "topic": "microscopy", "licence": "CC BY-SA 4.0"},
+    {"key": "staining", "url": "https://en.wikipedia.org/wiki/Staining", "topic": "microscopy", "licence": "CC BY-SA 4.0"}
+  ]
 }
