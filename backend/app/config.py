@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     max_saved_experiments_per_user: int = Field(default=50, gt=0)
     max_drafts_per_user: int = Field(default=10, gt=0)
     draft_ttl_hours: int = Field(default=24, gt=0, le=168)
+    # RAG reference passages. Ingestion (backend/rag/ingest.py) and retrieval must use the same
+    # model: each stored row records it, and its content hash includes it.
+    rag_embedding_model: str = Field(default="gemini-embedding-2", min_length=1)
 
     @property
     def logbook_configured(self) -> bool:
