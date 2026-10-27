@@ -5,6 +5,7 @@ sources are invented text."""
 from dataclasses import replace
 from datetime import date
 import json
+import logging
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -188,6 +189,17 @@ def test_dry_run_on_the_committed_sources_calls_nothing(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert f"sources={len(load_entries(RAG / 'sources.json'))} " in out
     assert "Dry run: nothing embedded or stored." in out
+
+
+def test_main_quiets_the_httpx_request_lines(tmp_path):
+    httpx_logger = logging.getLogger("httpx")
+    level = httpx_logger.level
+    httpx_logger.setLevel(logging.NOTSET)
+    try:
+        assert ingest.main(["--dry-run"], rag_dir=make_rag(tmp_path, [(META, BODY)]), settings=settings()) == 0
+        assert httpx_logger.level == logging.WARNING
+    finally:
+        httpx_logger.setLevel(level)
 
 
 # --- Validation ---

@@ -530,6 +530,18 @@ def test_a_bad_contact_stops_before_any_request(rag_dir, web, sleeps, contact):
     assert web.requests == []
 
 
+def test_main_quiets_the_httpx_request_lines(rag_dir, web, sleeps):
+    httpx_logger = logging.getLogger("httpx")
+    level = httpx_logger.level
+    httpx_logger.setLevel(logging.NOTSET)
+    try:
+        write_entries(rag_dir, WIKI_ENTRY)
+        run(rag_dir, web, sleeps)
+        assert httpx_logger.level == logging.WARNING
+    finally:
+        httpx_logger.setLevel(level)
+
+
 def test_contact_is_required():
     with pytest.raises(SystemExit):
         fetch.main([])
