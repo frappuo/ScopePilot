@@ -7,7 +7,7 @@ const http = loadTs('src/api/http.ts', { 'expo-file-system': { File: class {}, U
 const { ApiError, MESSAGES, CREATE_TIMEOUT_MS, AI_TIMEOUT_MS, ACCOUNT_DELETE_TIMEOUT_MS } = http;
 const {
   createLogbookApi, parseExperiment, parseSummary, parsePage, parseMe, isUuid, PAGE_LIMIT, MAX_PAGES,
-  parseAnswer, parseQuiz, stripLikePython, questionLength, QUESTION_MAX, ACCOUNT_DELETE_CONFIRM,
+  parseAnswer, parseSource, isHttpsUrl, parseQuiz, stripLikePython, questionLength, QUESTION_MAX, ACCOUNT_DELETE_CONFIRM,
 } = loadTs('src/api/logbookApi.ts', { './http': http });
 
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
@@ -210,7 +210,8 @@ const quiz = { questions: [question('Q1?'), question('Q2?'), question('Q3?')] };
 test('ask posts the stripped question to the ask path with the AI timeout and the signal', async () => {
   const { api, requests } = fakeClient([{ answer: 'An answer.' }]);
   const signal = new AbortController().signal;
-  assert.equal(await api.askExperiment(ID.toUpperCase(), '  What is this?\n', { signal }), 'An answer.');
+  assert.deepEqual(await api.askExperiment(ID.toUpperCase(), '  What is this?\n', { signal }),
+    { answer: 'An answer.', sources: [] });
   const [request] = requests;
   assert.deepEqual([request.op, request.method, request.path], ['ask', 'POST', `/v1/experiments/${ID}/ask`]);
   assert.deepEqual(request.json, { question: 'What is this?' });
@@ -267,11 +268,56 @@ test('stripping matches Python str.strip(), not JavaScript trim()', () => {
 });
 
 test('parseAnswer keeps a non-empty answer, stripped, and nothing else', () => {
-  assert.equal(parseAnswer({ answer: '  Plant cells.\n' }), 'Plant cells.');
-  assert.equal(parseAnswer({ answer: 'Plant cells.', model: 'x' }), 'Plant cells.');
+  assert.deepEqual(parseAnswer({ answer: '  Plant cells.\n' }), { answer: 'Plant cells.', sources: [] });
+  assert.deepEqual(parseAnswer({ answer: 'Plant cells.', model: 'x' }), { answer: 'Plant cells.', sources: [] });
   for (const bad of [null, 'text', [], {}, { answer: '' }, { answer: ' \n ' }, { answer: 3 }, { answer: null }]) {
     assert.equal(parseAnswer(bad), null);
   }
+});
+
+const source = {
+  title: 'Plant cell', section: 'Cell wall', url: 'https://en.wikipedia.org/wiki/Plant_cell', licence: 'CC BY-SA 4.0',
+};
+
+test('cited sources are copied in order with only their known fields; [] and missing mean none', () => {
+  const second = { ...source, title: 'Yeasts', section: null, url: 'https://bio.libretexts.org/Yeasts', licence: 'CC BY 4.0' };
+  const parsed = parseAnswer({ answer: 'Walls [1]. Budding [2].', sources: [{ ...source, extra: 'leak' }, second] });
+  assert.deepEqual(parsed, { answer: 'Walls [1]. Budding [2].', sources: [source, second] });
+  assert.equal('extra' in parsed.sources[0], false);
+  assert.deepEqual(parseAnswer({ answer: 'A.', sources: [] }), { answer: 'A.', sources: [] });
+  assert.deepEqual(parseAnswer({ answer: 'A.' }), { answer: 'A.', sources: [] });
+});
+
+const badSources = {
+  'sources null': null,
+  'sources an object': { 0: source },
+  'a string item': ['Plant cell'],
+  'a missing title': [(({ title, ...rest }) => rest)(source)],
+  'an empty title': [{ ...source, title: '' }],
+  'a numeric section': [{ ...source, section: 3 }],
+  'an empty section': [{ ...source, section: '' }],
+  'a missing section': [(({ section, ...rest }) => rest)(source)],
+  'an http url': [{ ...source, url: 'http://en.wikipedia.org/wiki/Plant_cell' }],
+  'a javascript url': [{ ...source, url: 'javascript:alert(1)' }],
+  'a relative url': [{ ...source, url: '/wiki/Plant_cell' }],
+  'a missing licence': [(({ licence, ...rest }) => rest)(source)],
+  'one bad item of two': [source, { ...source, url: 'ftp://example.test/x' }],
+};
+for (const [name, sources] of Object.entries(badSources)) {
+  test(`an ask response with ${name} is rejected`, () => {
+    assert.equal(parseAnswer({ answer: 'Walls [1].', sources }), null);
+  });
+}
+
+test('parseSource and isHttpsUrl accept only https links', () => {
+  assert.deepEqual(parseSource(source), source);
+  assert.equal(isHttpsUrl('https://en.wikipedia.org/wiki/X'), true);
+  for (const bad of ['http://x.test', 'mailto:a@b.test', 'not a url', '', 3, null]) assert.equal(isHttpsUrl(bad), false);
+});
+
+test('a malformed source makes the ask a bad response', async () => {
+  const { api } = fakeClient([{ answer: 'Walls [1].', sources: [{ ...source, url: 'http://x.test' }] }]);
+  assert.equal((await api.askExperiment(ID, 'Why?').catch(e => e)).kind, 'bad_response');
 });
 
 test('a valid quiz is copied with only the known fields', () => {

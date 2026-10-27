@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     rag_enabled: bool = False
     rag_top_k: int = Field(default=4, ge=1, le=8)
     # Provisional; cosine similarity (1 - distance) a passage needs to be used.
-    rag_min_similarity: float = Field(default=0.6, ge=0, le=1)
+    rag_min_similarity: float = Field(default=0.70, ge=0, le=1)
     # Wall-clock budget for the query embedding and the passage lookup together.
     rag_retrieval_timeout_seconds: float = Field(default=3.0, gt=0, le=10)
 

@@ -157,7 +157,7 @@ def test_retrieval_does_not_count_against_the_daily_gemini_cap(caplog, match, em
 
 @pytest.mark.parametrize("similarity, logged", [
     (1 + 5e-7, "1.00"),
-    (0.6 - 5e-7, "0.60"),
+    (0.7 - 5e-7, "0.70"),
 ], ids=["just-above-one", "just-below-min"])
 def test_similarity_rounding_at_either_end_is_tolerated(caplog, match, embedder, similarity, logged):
     match.rows = [row(similarity=similarity)]
@@ -276,7 +276,7 @@ def test_an_rpc_body_that_is_not_json_is_a_bad_response(caplog, match, embedder)
 def test_rag_settings_defaults():
     defaults = Settings(_env_file=None)
     assert defaults.rag_enabled is False
-    assert (defaults.rag_top_k, defaults.rag_min_similarity, defaults.rag_retrieval_timeout_seconds) == (4, 0.6, 3.0)
+    assert (defaults.rag_top_k, defaults.rag_min_similarity, defaults.rag_retrieval_timeout_seconds) == (4, 0.70, 3.0)
 
 
 @pytest.mark.parametrize("field, value", [

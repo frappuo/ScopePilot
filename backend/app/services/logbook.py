@@ -20,12 +20,24 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.schemas.analysis import Analysis, StoredAnalysis
-from app.schemas.ask import AskResponse
-from app.schemas.experiment import Experiment, ExperimentPage, ExperimentSummary, ExperimentUpdate
+from app.schemas.experiment import (
+    Experiment,
+    ExperimentAskResponse,
+    ExperimentPage,
+    ExperimentSummary,
+    ExperimentUpdate,
+)
 from app.schemas.me import DailyUsage
 from app.schemas.quiz import QuizResponse
+from app.services import rag
 from app.services.errors import AnalysisError
-from app.services.gemini import PROMPT_VERSION, analyze_image_with_model, answer_question, generate_quiz
+from app.services.gemini import (
+    PROMPT_VERSION,
+    analyze_image_with_model,
+    answer_question,
+    answer_with_passages,
+    generate_quiz,
+)
 from app.services.images import make_display_copies, prepare_image
 
 logger = logging.getLogger(__name__)
@@ -630,9 +642,20 @@ def _followup_analysis(user_id: str, experiment_id: str, settings: Settings) -> 
     return stored
 
 
-def ask_experiment(user_id: str, experiment_id: str, question: str, settings: Settings) -> AskResponse:
-    """Answer a question about the user's own experiment from its stored analysis. Stores nothing."""
-    return answer_question(_followup_analysis(user_id, experiment_id, settings), question, settings)
+def ask_experiment(user_id: str, experiment_id: str, question: str, settings: Settings) -> ExperimentAskResponse:
+    """Answer a question about the user's own experiment from its stored analysis. Stores nothing.
+
+    The checks and the quota charge come first, so a 404, 422 or 429 makes no embedding call.
+    With RAG_ENABLED, reference passages are retrieved (never counted against any quota); with
+    none, the ask is exactly the one without RAG and sources is []. Either way one Gemini call,
+    one quota unit and one daily-cap count.
+    """
+    stored = _followup_analysis(user_id, experiment_id, settings)
+    # rag.retrieve_passages through the module: rag imports this module, so no name is bound at import.
+    passages = rag.retrieve_passages(question, stored.probable_specimen, settings) if settings.rag_enabled else []
+    if passages:
+        return answer_with_passages(stored, question, passages, settings)
+    return ExperimentAskResponse(answer=answer_question(stored, question, settings).answer)
 
 
 def quiz_experiment(user_id: str, experiment_id: str, settings: Settings) -> QuizResponse:

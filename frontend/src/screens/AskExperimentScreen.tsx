@@ -1,17 +1,18 @@
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useRef, useState, type Ref } from 'react';
-import { AccessibilityInfo, Platform, View, type ScrollView } from 'react-native';
+import { AccessibilityInfo, Linking, Platform, View, type ScrollView } from 'react-native';
 import { createAiSession, type AiFailure } from '../api/aiSession';
 import { sanitizeAnswer } from '../api/answerText';
 import { dailyUsage, limitedUsage, useDailyUsage, type DailyUsageStore } from '../api/dailyUsage';
 import { MESSAGES } from '../api/http';
-import { QUESTION_MAX, questionLength, stripLikePython, type LogbookApi } from '../api/logbookApi';
+import { isHttpsUrl, QUESTION_MAX, questionLength, stripLikePython, type LogbookApi } from '../api/logbookApi';
 import { noteLogbookChanged } from '../api/logbookChanges';
 import { useLogbookApi } from '../api/useLogbookApi';
 import {
-  AppText, Button, Card, FieldGroup, FieldRow, Group, Notice, Pill, Screen, ScreenHeading, Stack,
+  AppText, Button, Card, FieldGroup, FieldRow, Group, Notice, Pill, Screen, ScreenHeading, Stack, TextLink,
 } from '../components/ui';
 import type { ScreenProps } from '../navigation/types';
+import type { AskSource } from '../types/ask';
 import type { DailyUsage } from '../types/experiment';
 import { DISCLAIMER } from './copy';
 import { MissingObservation } from './missingObservation';
@@ -28,7 +29,37 @@ export const ANSWER_RECEIVED = 'Answer received';
 // limit is checked with questionLength, as askExperiment does.
 export const QUESTION_INPUT_MAX = QUESTION_MAX * 2;
 
-export type Exchange = { key: number; question: string; answer: string };
+// Under an answer that cites reference passages. They explain the topic in general and never
+// say what the image shows; the student checks that at the microscope.
+export const SOURCES_LABEL = 'Sources';
+export const SOURCES_NOTE = 'Reference material on the topic, not evidence about your image.';
+export const OPEN_SOURCE = 'Open source';
+
+// [n] in the answer is sources[n - 1]. Missing or [] shows no Sources section.
+export type Exchange = { key: number; question: string; answer: string; sources?: AskSource[] };
+
+export function sourceHeading(source: AskSource, index: number): string {
+  return `${index + 1}. ${source.title}${source.section ? ` — ${source.section}` : ''}`;
+}
+
+// https only, as parseSource already checked; a link that cannot open does nothing.
+export function openSource(url: string, open: (url: string) => Promise<unknown> = target => Linking.openURL(target)): void {
+  if (!isHttpsUrl(url)) return;
+  open(url).catch(() => {});
+}
+
+function Sources({ sources }: { sources: AskSource[] }) {
+  return <Group>
+    <AppText variant="label">{SOURCES_LABEL}</AppText>
+    <AppText variant="caption" tone="muted">{SOURCES_NOTE}</AppText>
+    {sources.map((source, index) => <Group key={index}>
+      <AppText>{sourceHeading(source, index)}</AppText>
+      <AppText variant="caption" tone="muted">{`Licence: ${source.licence}`}</AppText>
+      <TextLink title={OPEN_SOURCE} accessibilityLabel={`${OPEN_SOURCE} ${index + 1}, ${source.title}`}
+        onPress={() => openSource(source.url)} />
+    </Group>)}
+  </Group>;
+}
 
 // Space kept above "You asked" when scrolling to a new exchange.
 export const SCROLL_MARGIN = 16;
@@ -59,7 +90,7 @@ export function questionCounter(question: string): { text: string; label: string
     : { text: `${length}/${QUESTION_MAX}`, label: `${length} of ${QUESTION_MAX} characters`, over: false };
 }
 
-export type AskOutcome = { ok: true; question: string; answer: string } | AiFailure;
+export type AskOutcome = { ok: true; question: string; answer: string; sources: AskSource[] } | AiFailure;
 
 // One per screen (src/api/aiSession.ts): the double-submit guard, the abort on unmount, and the
 // usage refresh after every outcome.
@@ -74,8 +105,8 @@ export function createAskSession(
     const result = await session.run(signal => api.askExperiment(id, question, { signal }));
     if (!result || !result.ok) return result;
     // parseAnswer checked it is non-empty; Markdown markers alone would leave nothing to show.
-    if (!sanitizeAnswer(result.value)) return { ok: false, kind: 'bad_response', message: MESSAGES.badResponse };
-    return { ok: true, question: stripLikePython(question), answer: result.value };
+    if (!sanitizeAnswer(result.value.answer)) return { ok: false, kind: 'bad_response', message: MESSAGES.badResponse };
+    return { ok: true, question: stripLikePython(question), answer: result.value.answer, sources: result.value.sources };
   }
 
   return { send, dispose: session.dispose };
@@ -134,6 +165,7 @@ export function AskView({
           </Group>
         </View>
         <AppText selectable>{sanitizeAnswer(exchange.answer)}</AppText>
+        {exchange.sources?.length ? <Sources sources={exchange.sources} /> : null}
       </Card></View>)
       : <AppText tone="muted">{EMPTY_LINE}</AppText>}
     {error ? <Notice kind="error">{error}</Notice> : null}
@@ -189,7 +221,7 @@ export default function AskExperimentScreen({ navigation, route }: ScreenProps<'
     if (outcome.ok) {
       const key = nextKey.current++;
       scrollPending.current = key;
-      setExchanges(list => [...list, { key, question: outcome.question, answer: outcome.answer }]);
+      setExchanges(list => [...list, { key, question: outcome.question, answer: outcome.answer, sources: outcome.sources }]);
       setQuestion('');
       return;
     }

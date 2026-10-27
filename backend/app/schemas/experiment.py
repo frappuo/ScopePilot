@@ -5,7 +5,7 @@ import unicodedata
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, model_validator
 
 from app.schemas.analysis import Analysis
-from app.schemas.ask import Question
+from app.schemas.ask import AskResponse, Question
 
 
 class Experiment(BaseModel):
@@ -94,3 +94,21 @@ class ExperimentAskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: Question
+
+
+class AskSource(BaseModel):
+    """Attribution for a cited reference passage: biology in general, never evidence about the image."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    section: str | None
+    url: str
+    licence: str
+
+
+class ExperimentAskResponse(AskResponse):
+    """Response of POST /v1/experiments/{id}/ask. sources lists the passages the answer cites as
+    [n], item n-1 for [n]; it is [] when no passages were used. Legacy /ask keeps AskResponse."""
+
+    sources: list[AskSource] = []

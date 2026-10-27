@@ -9,6 +9,7 @@ const usageModule = loadTs('src/api/dailyUsage.ts', { './http': http });
 const changes = loadTs('src/api/logbookChanges.ts');
 const focusEffects = [];
 const announcements = [];
+const opened = [];
 let fakeApi = {};
 const module_ = loadModule('src/screens/AskExperimentScreen.tsx', {
   '../api/http': http,
@@ -24,10 +25,12 @@ const module_ = loadModule('src/screens/AskExperimentScreen.tsx', {
     announceForAccessibilityWithOptions: text => announcements.push(text),
     sendAccessibilityEvent: () => {},
   },
+  Linking: { openURL: async url => { opened.push(url); } },
 });
 const Ask = module_.default;
 const {
   AskView, createAskSession, sendBlock, questionCounter, ASK_TITLE, ASK_SUBTITLE, EMPTY_LINE, QUESTION_INPUT_MAX,
+  SOURCES_LABEL, SOURCES_NOTE, OPEN_SOURCE, openSource,
 } = module_;
 const { formatResetTime, errorToShow } = loadModule('src/screens/usageStatus.tsx', { '../api/http': http });
 
@@ -38,6 +41,10 @@ const spent = { ...usage, used_today: 40, remaining: 0 };
 const exchanges = [
   { key: 0, question: 'What stain was likely used?', answer: 'The analysis does not name a stain.' },
   { key: 1, question: 'Why are the cells rectangular?', answer: 'Plant epidermal cells often sit in rows.' },
+];
+const sources = [
+  { title: 'Plant cell', section: 'Cell wall', url: 'https://en.wikipedia.org/wiki/Plant_cell', licence: 'CC BY-SA 4.0' },
+  { title: 'Yeasts', section: null, url: 'https://bio.libretexts.org/Yeasts', licence: 'CC BY 4.0' },
 ];
 
 function view(props = {}) {
@@ -97,6 +104,32 @@ for (const scheme of ['light', 'dark']) {
     assert.equal(answer.props.selectable, true);
     // No scrolling to the end of the content; the screen scrolls to a new exchange's top instead.
     assert.equal(find(hosts, 'ScrollView')[0].props.onContentSizeChange, undefined);
+  });
+
+  test(`${scheme}: cited sources show under the answer with the fixed note, licence and link`, () => {
+    opened.length = 0;
+    const { hosts } = show({ exchanges: [{ ...exchanges[0], answer: 'Walls [1]. Budding [2].', sources }] });
+    const all = texts(hosts);
+    const start = all.indexOf(SOURCES_LABEL);
+    assert.ok(start > all.indexOf('Walls [1]. Budding [2].'), 'Sources is under the answer');
+    assert.deepEqual(all.slice(start, start + 8), [
+      'Sources', 'Reference material on the topic, not evidence about your image.',
+      '1. Plant cell — Cell wall', 'Licence: CC BY-SA 4.0', OPEN_SOURCE,
+      '2. Yeasts', 'Licence: CC BY 4.0', OPEN_SOURCE,
+    ]);
+    assert.equal(SOURCES_NOTE, 'Reference material on the topic, not evidence about your image.');
+    const links = find(hosts, 'Pressable').filter(entry => entry.props.accessibilityRole === 'link');
+    assert.deepEqual(links.map(entry => entry.props.accessibilityLabel), ['Open source 1, Plant cell', 'Open source 2, Yeasts']);
+    links[1].props.onPress();
+    assert.deepEqual(opened, ['https://bio.libretexts.org/Yeasts']);
+  });
+
+  test(`${scheme}: no sources, or an empty list, shows no Sources section`, () => {
+    for (const exchange of [exchanges[0], { ...exchanges[0], sources: [] }]) {
+      const { hosts } = show({ exchanges: [exchange] });
+      const all = texts(hosts);
+      assert.ok(!all.includes(SOURCES_LABEL) && !all.includes(SOURCES_NOTE) && !all.includes(OPEN_SOURCE));
+    }
   });
 
   test(`${scheme}: each exchange reports its offset as it lays out`, () => {
@@ -198,6 +231,16 @@ for (const scheme of ['light', 'dark']) {
   });
 }
 
+test('openSource opens https links only and ignores a link that cannot open', async () => {
+  const urls = [];
+  openSource('https://en.wikipedia.org/wiki/Plant_cell', async url => { urls.push(url); });
+  openSource('http://en.wikipedia.org/wiki/Plant_cell', async url => { urls.push(url); });
+  openSource('javascript:alert(1)', async url => { urls.push(url); });
+  openSource('https://bio.libretexts.org/Yeasts', async () => { throw new Error('no handler'); });
+  await settle();
+  assert.deepEqual(urls, ['https://en.wikipedia.org/wiki/Plant_cell']);
+});
+
 test('a new exchange scrolls to its top, a small margin above "You asked"', () => {
   assert.equal(module_.SCROLL_MARGIN, 16);
   assert.equal(module_.exchangeScrollTarget(420), 404);
@@ -222,8 +265,8 @@ test('a second send while one runs makes no request; the next one after it does'
   const first = session.send('  Why?  ');
   assert.equal(await session.send('Why?'), null);
   assert.equal(asked.length, 1);
-  answer('Because.');
-  assert.deepEqual(await first, { ok: true, question: 'Why?', answer: 'Because.' });
+  answer({ answer: 'Because [1].', sources: [sources[0]] });
+  assert.deepEqual(await first, { ok: true, question: 'Why?', answer: 'Because [1].', sources: [sources[0]] });
   void session.send('And then?');
   assert.equal(asked.length, 2);
   assert.deepEqual(asked.map(([id]) => id), [ID, ID]);
@@ -271,7 +314,7 @@ test('every outcome goes to the usage store; failures keep their fixed messages'
   assert.deepEqual(await fail(new Error('raw backend text')), { ok: false, kind: 'failed', message: http.MESSAGES.failed });
   const store = usageRecorder();
   // A heading marker alone: non-empty from the backend, empty once sanitised.
-  const session = createAskSession({ askExperiment: async () => '##' }, ID, store);
+  const session = createAskSession({ askExperiment: async () => ({ answer: '##', sources }) }, ID, store);
   assert.deepEqual(await session.send('Why?'), { ok: false, kind: 'bad_response', message: http.MESSAGES.badResponse });
   assert.deepEqual(store.calls, [undefined]);
 });

@@ -1,4 +1,5 @@
 import type { Analysis } from '../types/analysis';
+import type { AskAnswer, AskSource } from '../types/ask';
 import type {
   DailyUsage, Experiment, ExperimentPage, ExperimentPatch, ExperimentStatus, ExperimentSummary, Me,
 } from '../types/experiment';
@@ -138,10 +139,42 @@ export function questionLength(question: string): number {
   return Array.from(stripLikePython(question)).length;
 }
 
-// AskResponse (backend/app/schemas/ask.py:17-20): a stripped, non-empty answer.
-export function parseAnswer(value: unknown): string | null {
+export function isHttpsUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isText(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+// AskSource (backend/app/schemas/experiment.py): only the known fields, and an https URL.
+export function parseSource(value: unknown): AskSource | null {
+  if (!isRecord(value) || !isText(value.title) || !(value.section === null || isText(value.section)) ||
+      !isHttpsUrl(value.url) || !isText(value.licence)) return null;
+  return { title: value.title, section: value.section, url: value.url, licence: value.licence };
+}
+
+// ExperimentAskResponse (backend/app/schemas/experiment.py; AskResponse in ask.py:17-20): a
+// stripped, non-empty answer and its cited sources. Missing sources means none; one malformed
+// source makes the whole response malformed.
+export function parseAnswer(value: unknown): AskAnswer | null {
   if (!isRecord(value) || typeof value.answer !== 'string') return null;
-  return stripLikePython(value.answer) || null;
+  const answer = stripLikePython(value.answer);
+  if (!answer) return null;
+  if (value.sources === undefined) return { answer, sources: [] };
+  if (!Array.isArray(value.sources)) return null;
+  const sources: AskSource[] = [];
+  for (const item of value.sources) {
+    const source = parseSource(item);
+    if (!source) return null;
+    sources.push(source);
+  }
+  return { answer, sources };
 }
 
 function strippedText(value: unknown): string | null {
@@ -270,7 +303,7 @@ export function createLogbookApi(client: ApiClient) {
 
     // One AI request from today's quota; nothing is stored. An empty or too long question is
     // rejected here without a request.
-    async askExperiment(id: string, question: string, { signal }: { signal?: AbortSignal } = {}): Promise<string> {
+    async askExperiment(id: string, question: string, { signal }: { signal?: AbortSignal } = {}): Promise<AskAnswer> {
       const path = experimentPath(id, 'ask');
       const length = questionLength(question);
       if (length < 1 || length > QUESTION_MAX) throw new ApiError('invalid', null, MESSAGES.invalidQuestion);
