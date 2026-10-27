@@ -1,0 +1,10 @@
+{
+  "_fixture": "Synthetic MediaWiki siteinfo response.",
+  "batchcomplete": true,
+  "query": {
+    "rightsinfo": {
+      "url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "text": "Creative Commons Attribution-Share Alike 4.0"
+    }
+  }
+}
