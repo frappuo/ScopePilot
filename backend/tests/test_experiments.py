@@ -1110,7 +1110,7 @@ def test_follow_up_on_own_experiment_uses_stored_analysis(client, fake, answers,
     rows, objects = json.loads(json.dumps(fake.rows)), dict(fake.objects)
     response = follow_up(client, action, experiment_id)
     assert response.status_code == 200
-    assert response.json() == ({"answer": ANSWER} if action == "ask" else QUIZ)
+    assert response.json() == ({"answer": ANSWER, "sources": []} if action == "ask" else QUIZ)
 
     (quota,) = quota_calls(fake)
     assert json.loads(quota.content) == {"p_user": USER_A, "p_limit": settings().user_daily_gemini_limit}
