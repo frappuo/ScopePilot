@@ -1,0 +1,14 @@
+{
+  "_fixture": "Synthetic MediaWiki API response with invented text; not copied from Wikipedia.",
+  "batchcomplete": true,
+  "query": {
+    "pages": [
+      {
+        "pageid": 1001,
+        "ns": 0,
+        "title": "Plant cell wall",
+        "extract": "A plant cell wall is a layer outside the cell membrane in this invented lead paragraph.\nIt gives the cell its shape.\n\n\n== Structure ==\nThe wall is built from layers in this synthetic text.\n\n\n=== Layers ===\nThe middle lamella joins neighbouring cells.\n\n\n== History ==\n\n\n== Function ==\nThe wall resists the pressure of water inside the cell.\n\n\n=== Deep ===\n\n\n==== Deeper ====\nA level four heading.\n\n\n===== Deepest =====\nA level five heading.\n\n\n== See also ==\nCell membrane\n\n\n== References ==\nAn invented reference."
+      }
+    ]
+  }
+}
