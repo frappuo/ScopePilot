@@ -353,11 +353,13 @@ export function IconButton({ glyph, accessibilityLabel, onPress, disabled, busy 
 const ALIGN = { start: 'flex-start', end: 'flex-end', center: 'center' } as const;
 
 // A quiet text action. role="button" keeps the role of actions that were buttons before.
-export function TextLink({ title, onPress, disabled, align = 'start', role = 'link' }: {
+export function TextLink({ title, onPress, disabled, align = 'start', role = 'link', accessibilityLabel }: {
   title: string; onPress: () => void; disabled?: boolean; align?: keyof typeof ALIGN; role?: 'link' | 'button';
+  accessibilityLabel?: string;
 }) {
   const [styles, theme] = useUiStyles();
-  return <Pressable accessibilityRole={role} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled}
+  return <Pressable accessibilityRole={role} accessibilityLabel={accessibilityLabel}
+    accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled}
     onPress={onPress} style={({ pressed }) => [styles.textLink, { alignSelf: ALIGN[align] }, (pressed || disabled) && styles.dim]}>
     <Text maxFontSizeMultiplier={theme.type.body.maxFontSizeMultiplier} style={styles.textLinkText}>{title}</Text>
   </Pressable>;
