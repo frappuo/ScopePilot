@@ -1,16 +1,22 @@
 import pytest
 
+from app.config import Settings
 from app.services import gemini
 
-SHELL_SETTINGS = ("LEGACY_API_ENABLED", "APP_TOKEN", "SUPABASE_URL", "SUPABASE_SECRET_KEY",
-                  "GEMINI_FALLBACK_MODELS")
+# Every setting, by its environment variable name, so a new setting is covered without a list to update.
+SHELL_SETTINGS = tuple(name.upper() for name in Settings.model_fields)
 
 
 @pytest.fixture(autouse=True)
 def clean_shell_settings(monkeypatch):
-    """Settings(_env_file=None) still reads the OS environment; keep the developer's shell out."""
+    """Settings(_env_file=None) still reads the OS environment; keep the developer's shell out.
+
+    backend/.env is switched off too, for any Settings() built without _env_file, so no test can
+    read the developer's real keys. A test that needs an env file passes its own _env_file.
+    """
     for name in SHELL_SETTINGS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @pytest.fixture(autouse=True)

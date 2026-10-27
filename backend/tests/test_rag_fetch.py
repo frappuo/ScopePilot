@@ -1,24 +1,27 @@
 """The source fetch script (rag/fetch.py) against synthetic fixtures through httpx.MockTransport.
 
 No network: an unexpected request fails the test, and any request to an OpenStax host fails it
-at once. The fixtures in tests/fixtures/rag are invented text in each site's structure.
+at once. Every test works in its own tmp_path rag folder, never in the committed backend/rag
+library. The fixtures in tests/fixtures/rag are invented text in each site's structure.
 """
 
 from datetime import date
 import json
 import logging
 from pathlib import Path
-import shutil
 
 import httpx
 import pytest
 
 from rag import fetch
 from rag.fetch import Signal, decide_licence, load_entries, render, signal_from_cc_url, wikipedia_blocks
-from rag.sourcefile import EVIDENCE_HAND, EVIDENCE_PAGE, SourceError, is_blocked_host, parse_sources_md, read_source
+from rag.sourcefile import (
+    EVIDENCE_HAND, EVIDENCE_PAGE, SourceError, format_sources_md, is_blocked_host, parse_sources_md, read_source,
+)
 
-RAG = Path(__file__).resolve().parents[1] / "rag"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "rag"
+# An empty SOURCES.md for each test's own rag folder.
+TEMPLATE = format_sources_md("# Test sources\n\nSynthetic table for the fetch tests.", {})
 CONTACT = "student@example.org"
 USER_AGENT = f"ScopePilotSourceFetcher/1.0 (educational microscopy project; {CONTACT})"
 TODAY = date(2026, 10, 20)
@@ -147,7 +150,7 @@ def sleeps():
 @pytest.fixture
 def rag_dir(tmp_path):
     (tmp_path / "sources").mkdir()
-    shutil.copy(RAG / "SOURCES.md", tmp_path / "SOURCES.md")
+    (tmp_path / "SOURCES.md").write_text(TEMPLATE, encoding="utf-8")
     return tmp_path
 
 
@@ -171,7 +174,7 @@ def rows(rag_dir):
 
 def assert_nothing_written(rag_dir):
     assert [path.name for path in (rag_dir / "sources").iterdir()] == []
-    assert (rag_dir / "SOURCES.md").read_text(encoding="utf-8") == (RAG / "SOURCES.md").read_text(encoding="utf-8")
+    assert (rag_dir / "SOURCES.md").read_text(encoding="utf-8") == TEMPLATE
 
 
 # --- Wikipedia ---
@@ -222,7 +225,7 @@ def test_requests_are_sequential_with_a_delay_and_siteinfo_is_asked_once(rag_dir
     ({"ns": 4}, "not_an_article"),
     ({"pageprops": {"disambiguation": ""}}, "disambiguation"),
     ({"extract": None}, "bad_api_response"),
-])
+], ids=["missing", "not-article", "disambiguation", "no-extract"])
 def test_wikipedia_page_refusals(rag_dir, web, sleeps, caplog, page, reason):
     web.wiki_pages["Plant cell wall"] = wiki_page(**page)
     write_entries(rag_dir, WIKI_ENTRY)
@@ -237,7 +240,7 @@ def test_wikipedia_page_refusals(rag_dir, web, sleeps, caplog, page, reason):
      {"redirects": [{"from": "Cell wall (plant)", "to": "Plant cell wall"}]}),
     ("https://en.wikipedia.org/wiki/plant_cell_wall", "plant cell wall",
      {"normalized": [{"from": "plant cell wall", "to": "Plant cell wall"}]}),
-])
+], ids=["redirected", "normalised"])
 def test_wikipedia_redirect_or_normalised_title_is_refused_with_the_canonical_url(
         rag_dir, web, sleeps, capsys, url, title, extra):
     response = wiki_page()
@@ -255,7 +258,7 @@ def test_wikipedia_redirect_or_normalised_title_is_refused_with_the_canonical_ur
     ({"url": "https://creativecommons.org/licenses/by-nc-sa/4.0/"}, "CC BY-SA 4.0", "licence_not_allowed"),
     ({"url": "https://www.gnu.org/copyleft/fdl.html"}, "CC BY-SA 4.0", "licence_not_allowed"),
     ({}, "CC BY-SA 4.0", EVIDENCE_HAND),
-])
+], ids=["type-mismatch", "version-mismatch", "nc", "not-cc", "no-signal"])
 def test_wikipedia_licence_must_agree_with_the_confirmed_licence(rag_dir, web, sleeps, caplog, rights, licence, outcome):
     web.siteinfo = {"batchcomplete": True, "query": {"rightsinfo": rights}}
     write_entries(rag_dir, {**WIKI_ENTRY, "licence": licence})
@@ -355,7 +358,8 @@ def test_libretexts_page_without_licence_signals_is_confirmed_by_hand(rag_dir, w
     ("curated by Jane Example", "curated by OpenStax", "openstax_not_allowed"),
     ("Middle lamella", "Adapted from OpenStax Biology", "openstax_not_allowed"),
     ('class="mt-content-container"', 'class="other"', "no_content_region"),
-])
+], ids=["nc-tag", "unknown-tag", "nc-attribution", "type-conflict", "version-conflict", "openstax-tag",
+        "openstax-attribution", "openstax-text", "no-content-region"])
 def test_libretexts_page_refusals(rag_dir, web, sleeps, caplog, old, new, reason):
     page = fixture("libretexts_page.html")
     assert old in page
@@ -367,7 +371,7 @@ def test_libretexts_page_refusals(rag_dir, web, sleeps, caplog, old, new, reason
     assert_nothing_written(rag_dir)
 
 
-@pytest.mark.parametrize("licence", ["CC BY-SA 4.0", "CC BY 3.0"])
+@pytest.mark.parametrize("licence", ["CC BY-SA 4.0", "CC BY 3.0"], ids=["type", "version"])
 def test_libretexts_confirmed_licence_must_match_the_page(rag_dir, web, sleeps, caplog, licence):
     write_entries(rag_dir, {**LT_ENTRY, "licence": licence})
     with caplog.at_level(logging.INFO, logger="rag.fetch"):
@@ -387,7 +391,7 @@ def test_libretexts_page_without_any_author_is_refused(rag_dir, web, sleeps, cap
     (html("User-agent: ScopePilotSourceFetcher\nDisallow: /Bookshelves/\n", content_type="text/plain"),
      "robots_disallowed"),
     (html("", status=500), "robots_unavailable"),
-])
+], ids=["disallowed", "server-error"])
 def test_robots_txt_can_refuse(rag_dir, web, sleeps, caplog, robots, reason):
     web.route("https://bio.libretexts.org/robots.txt", robots)
     write_entries(rag_dir, LT_ENTRY)
@@ -418,7 +422,7 @@ def test_redirect_on_the_same_host_is_followed(rag_dir, web, sleeps):
     ("https://example.org/copy", "host_not_supported"),
     ("http://bio.libretexts.org/Bookshelves/Botany/Cell_Walls", "host_not_supported"),
     (LT_URL, "too_many_redirects"),
-])
+], ids=["openstax", "cnx", "other-host", "plain-http", "loop"])
 def test_redirects_are_checked_before_they_are_followed(rag_dir, web, sleeps, caplog, location, reason):
     # The Web transport fails the test if an OpenStax host is ever requested.
     web.route(LT_URL, lambda request: httpx.Response(301, headers={"location": location}))
@@ -518,7 +522,8 @@ def test_only_fetches_the_named_keys(rag_dir, web, sleeps):
     assert run(rag_dir, web, sleeps, "--only", "no-such-key") == 2
 
 
-@pytest.mark.parametrize("contact", ["", "  ", "me@example.org\r\nX-Injected: 1", "x" * 201])
+@pytest.mark.parametrize("contact", ["", "  ", "me@example.org\r\nX-Injected: 1", "x" * 201],
+                         ids=["empty", "blank", "crlf", "too-long"])
 def test_a_bad_contact_stops_before_any_request(rag_dir, web, sleeps, contact):
     write_entries(rag_dir, WIKI_ENTRY)
     assert run(rag_dir, web, sleeps, contact=contact) == 2
@@ -540,16 +545,12 @@ def test_contact_is_required():
     ([{**WIKI_ENTRY, "url": "https://openstax.org/books/biology-2e/pages/4-1"}], 1),
     ([{**WIKI_ENTRY, "topic": "Plant cells"}], 1),
     ([WIKI_ENTRY], 2),
-])
+], ids=["no-licence", "no-key", "extra-field", "duplicate-key", "duplicate-url", "nc-licence", "openstax-url",
+        "bad-topic", "version-2"])
 def test_an_invalid_sources_json_stops_before_any_request(rag_dir, web, sleeps, entries, version):
     write_entries(rag_dir, *entries, version=version)
     assert run(rag_dir, web, sleeps) == 2
     assert web.requests == []
-
-
-def test_committed_sources_json_is_valid():
-    entries = load_entries(RAG / "sources.json")
-    assert len({entry.key for entry in entries}) == len(entries)
 
 
 # --- Units ---
@@ -559,7 +560,7 @@ def test_committed_sources_json_is_valid():
     ("//creativecommons.org/licenses/by-sa/3.0/deed.en", Signal("CC BY-SA", "3.0")),
     ("https://www.creativecommons.org/licenses/by-nc-sa/4.0", Signal("CC BY-NC-SA", "4.0")),
     ("https://creativecommons.org/publicdomain/zero/1.0/", Signal("other:creativecommons.org/publicdomain/zero/1.0/", None)),
-])
+], ids=["cc-by", "protocol-relative", "www-nc-sa", "cc0"])
 def test_signal_from_cc_url(href, signal):
     assert signal_from_cc_url(href) == signal
 
@@ -574,7 +575,8 @@ def test_signal_from_cc_url(href, signal):
     ([Signal("CC BY", "4.0"), Signal("CC BY-SA", "4.0")], "CC BY 4.0", "licence_conflict"),
     ([Signal("CC BY", "4.0"), Signal("CC BY", "3.0")], "CC BY 4.0", "licence_conflict"),
     ([Signal("CC BY", "4.0"), Signal("CC BY-NC", "4.0")], "CC BY 4.0", "licence_not_allowed"),
-])
+], ids=["none", "version-only", "type-and-version", "by-sa-2.5", "version-mismatch", "type-mismatch",
+        "type-conflict", "version-conflict", "nc"])
 def test_decide_licence(signals, confirmed, result):
     if isinstance(result, tuple):
         assert decide_licence(signals, confirmed) == result

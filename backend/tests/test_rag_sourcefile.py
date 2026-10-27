@@ -64,6 +64,11 @@ def test_a_body_with_a_dash_line_keeps_it():
     ("retrieved: 2026-10-20", "retrieved: 2026-02-30"),
     ("topic: plant-cells", "topic: Plant cells"),
     (BODY, "   "),
+], ids=[
+    "missing-field", "unknown-field", "duplicate-field", "blank-line", "no-space", "empty-value", "long-title",
+    "http-url", "openstax-url", "cnx-url", "fragment-url", "userinfo-url", "openstax-author", "nc-licence",
+    "nd-licence", "cc0-licence", "old-version", "lowercase-licence", "prose-date", "impossible-date", "bad-topic",
+    "empty-body",
 ])
 def test_parse_source_refuses_a_broken_rule(old, new):
     assert old in TEXT
@@ -84,7 +89,8 @@ def test_parse_source_refuses_missing_or_unclosed_front_matter():
         parse_source(TEXT.replace("\n---\n", "\n", 1), "plant-cell")
 
 
-@pytest.mark.parametrize("key", ["", "Plant-cell", "plant_cell", "-plant", "a" * 81, "plant cell"])
+@pytest.mark.parametrize("key", ["", "Plant-cell", "plant_cell", "-plant", "a" * 81, "plant cell"],
+                         ids=["empty", "capital", "underscore", "leading-dash", "too-long", "space"])
 def test_parse_source_refuses_a_bad_key(key):
     with pytest.raises(SourceError):
         parse_source(TEXT, key)
@@ -110,7 +116,7 @@ def test_read_source_uses_the_file_name_as_key(tmp_path):
     ("plant-cell.txt", TEXT.encode()),
     ("plant-cell.md", TEXT.encode() + b"x" * (256 * 1024)),
     ("plant-cell.md", TEXT.encode().replace(b"invented", b"\xff\xfe")),
-])
+], ids=["bad-key", "not-md", "too-large", "not-utf8"])
 def test_read_source_refuses_and_names_the_file(tmp_path, name, data):
     path = tmp_path / name
     path.write_bytes(data)
@@ -122,12 +128,12 @@ def test_read_source_refuses_and_names_the_file(tmp_path, name, data):
 @pytest.mark.parametrize("host, blocked", [
     ("openstax.org", True), ("www.openstax.org", True), ("OpenStax.org.", True), ("legacy.cnx.org", True),
     ("notopenstax.org", False), ("openstax.org.example.com", False), ("bio.libretexts.org", False),
-])
+], ids=["openstax", "www-openstax", "mixed-case-dot", "cnx", "lookalike-prefix", "lookalike-suffix", "libretexts"])
 def test_is_blocked_host(host, blocked):
     assert is_blocked_host(host) is blocked
 
 
-def test_committed_sources_md_template_parses_and_is_canonical():
+def test_committed_sources_md_parses_and_is_canonical():
     text = (RAG / "SOURCES.md").read_text(encoding="utf-8")
     preamble, rows = parse_sources_md(text)
     assert preamble.startswith("# RAG reference sources")
@@ -158,7 +164,7 @@ TABLE = "# Sources\n\n| key | title | author | url | licence | licence evidence 
     TABLE + ROW.replace(" Converted. |", "") + "\n",
     TABLE + ROW + "\n" + ROW + "\n",
     TABLE + ROW + "\n\nText after the table.\n",
-])
+], ids=["no-table", "no-rule", "bad-evidence", "nc-licence", "seven-cells", "duplicate-row", "text-after"])
 def test_parse_sources_md_refuses_a_broken_table(text):
     with pytest.raises(SourceError):
         parse_sources_md(text)
