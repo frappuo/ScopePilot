@@ -698,6 +698,7 @@ def main(argv: list[str] | None = None, *, rag_dir: Path = RAG_DIR, transport: h
                         help="Fetch again when the file exists (never a 'confirmed by hand' file).")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # Its INFO lines print request URLs.
     try:
         entries = load_entries(rag_dir / "sources.json")
         with httpx.Client(timeout=TIMEOUT_SECONDS, follow_redirects=False, transport=transport) as client:

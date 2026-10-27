@@ -31,7 +31,9 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.services import logbook
 from app.services.errors import AnalysisError
-from app.services.rag import DOCUMENT_TEMPLATE, EMBED_BATCH, EMBEDDING_DIMENSIONS, document_text, embed_texts
+from app.services.rag import (
+    DOCUMENT_TEMPLATE, EMBED_BATCH, EMBEDDING_DIMENSIONS, document_text, embed_texts, vector_literal,
+)
 from rag.fetch import load_entries
 from rag.sourcefile import SourceError, SourceMeta, normalise, parse_sources_md, read_source
 
@@ -325,11 +327,6 @@ def _existing(settings: Settings) -> list[tuple[str, str]]:
         offset += LIST_PAGE
 
 
-def _vector_literal(vector: list[float]) -> str:
-    """pgvector's text form; PostgREST casts it to vector(768)."""
-    return "[" + ",".join(repr(value) for value in vector) + "]"
-
-
 @dataclass
 class IngestReport:
     embedded: int = 0
@@ -363,7 +360,7 @@ def ingest(chunks: list[Chunk], settings: Settings, *, prune: bool) -> IngestRep
                   "source_key": chunk.source_key, "title": chunk.title, "section": chunk.section, "url": chunk.url,
                   "licence": chunk.licence, "topic": chunk.topic, "content": chunk.content,
                   "content_hash": chunk.content_hash, "embedding_model": settings.rag_embedding_model,
-                  "embedding": _vector_literal(vector),
+                  "embedding": vector_literal(vector),
               } for chunk, vector in zip(batch, vectors, strict=True)])
         report.inserted += len(batch)
 
@@ -399,6 +396,7 @@ def main(argv: list[str] | None = None, *, rag_dir: Path = RAG_DIR, settings: Se
     parser.add_argument("--prune", action="store_true", help="Also delete the rows of sources that have no file.")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # Its INFO lines print request URLs.
     try:
         sources = load_sources(rag_dir)
     except SourceError as exc:

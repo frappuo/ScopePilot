@@ -14,11 +14,11 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
+from app.services.rag import LICENCE_PATTERN  # The rag_chunks.licence check, shared with retrieval.
+
 FIELDS = ("title", "url", "author", "licence", "retrieved", "topic")
 KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 TOPIC_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
-# The rag_chunks.licence check in supabase/migrations/0003_rag.sql.
-LICENCE_PATTERN = re.compile(r"CC BY(-SA)? (2\.0|2\.5|3\.0|4\.0)")
 BLOCKED_HOSTS = ("openstax.org", "cnx.org")
 MAX_TEXT_CHARS = 200  # title, author
 MAX_URL_CHARS = 2000
